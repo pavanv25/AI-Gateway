@@ -1,1 +1,1 @@
-# AI-Gateway
+# AI Gateway
