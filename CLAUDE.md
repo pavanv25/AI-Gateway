@@ -2,36 +2,65 @@
 
 ## Project Overview
 
-This is an Go-based AI Gateway that routes requests between multiple LLM providers through a unified API.
+Go-based AI Gateway that routes requests between multiple LLM providers (OpenAI, Anthropic) through a unified API. Enforces per-API-key token-per-minute rate limiting via Redis.
 
 ## Key Commands
-- Init: go mod init <your-module-path>
-- Run: `go run cmd/gateway/main.go`
-- Test: `go test ./...`
-- Lint: `golangci-lint run`
 
-## Project Layout (Strict)
-- `cmd/gateway/`: Application entry point.
-- `internal/api/`: Gin handlers and route definitions.
-- `internal/provider/`: Interfaces for LLM adapters.
-- `internal/ratelimit/`: Redis logic.
-- `pkg/models/`: Unified Request/Response structs.
+```bash
+go run ./cmd/gateway          # run the server (port 8080)
+go build -o bin/gateway ./cmd/gateway
+go test ./...                 # all tests (no external Redis needed — miniredis)
+go test ./internal/ratelimit/... -v -race
+go mod tidy                   # sync dependencies
+```
+
+Environment variables:
+- `TPM_LIMIT` — tokens per minute cap, default `60000`
+- `REDIS_URL` — Redis connection string, default `redis://localhost:6379`
+
+## Project Layout
+
+```
+cmd/gateway/          entry point — wires Redis, Limiter, providers, Gin router
+internal/
+  api/routes.go       RegisterRoutes; POST /v1/chat handler (non-streaming + SSE)
+  provider/
+    provider.go       Provider interface (Chat, ChatStream, Name)
+    mock.go           MockProvider — word-by-word streaming, no external calls
+    mock_test.go
+  ratelimit/
+    limiter.go        Sliding-window TPM limiter (Redis sorted set + Lua scripts)
+    middleware.go     AuthMiddleware — extracts X-API-Key header, 401 if absent
+    limiter_test.go   8 unit tests via miniredis
+pkg/models/models.go  ChatRequest, ChatResponse, Choice, Usage, StreamEvent
+```
+
+## What's Built
+
+- **Provider interface** — `Chat` (blocking) + `ChatStream` (returns `<-chan StreamEvent`, producer closes)
+- **MockProvider** — implements Provider; streams word-by-word; respects context cancellation
+- **Rate limiter** — sliding 60-second window keyed on `X-API-Key`; `Reserve` atomically checks capacity and records `max_tokens`; `Commit` corrects to actual token count after response
+- **POST /v1/chat** — parses `ChatRequest`, reserves tokens, calls provider, commits actual usage, returns JSON or SSE stream
+- **GET /health** — unauthenticated liveness check
+
+## What's Next
+
+- `internal/provider/openai.go` — implement `Provider` for OpenAI (`/v1/chat/completions`)
+- `internal/provider/anthropic.go` — implement `Provider` for Anthropic (`/v1/messages`)
+- Wire `StreamEvent` `Usage` field so streaming `Commit` uses actual tokens (currently commits 0)
+- Provider selector logic (beyond the current first-found fallback)
 
 ## Scaffolding Rules
-- **Interface First:** Define the `Provider` interface before implementing OpenAI/Anthropic.
-- **Dependency Injection:** Pass the Redis client and Config into handlers; no global state.
-- **Strict Typing:** Use `pkg/models` for all data crossing boundaries (don't use `map[string]interface{}`).
-- **Standard Library:** Favor Go standard library or established packages (Gin, Go-Redis).
 
-## Current Focus
-- Initializing the Go module.
-- Setting up the Gin router boilerplate.
-- Defining the shared Request/Response data models.
+- **Interface First** — define or extend `Provider` before implementing a new backend
+- **Dependency Injection** — pass `*redis.Client`, `Config`, and `*Limiter` into handlers; no global state
+- **Strict Typing** — use `pkg/models` for all data crossing package boundaries; no `map[string]interface{}`
+- **Standard Library** — favor stdlib + established packages (Gin, go-redis); no new framework introductions
 
-## What Not To Include
+## What Not To Include (yet)
 
-- Do not write logic for cost/latency yet. Use a hardcoded ProviderA vs ProviderB toggle for now
-- No Multi-Tenancy: Do not implement user accounts, database persistence for keys, or organizations.
-- No Observability Sprawl: Avoid OpenTelemetry, Prometheus, or Grafana wrappers at this stage. Standard logs are enough.
-- No Request Caching: Do not implement Redis caching for LLM responses yet; Redis should only be scoped for rate-limiting scaffolding.
-- No Advanced Retries: Do not implement exponential backoff or complex circuit breakers. Stick to a basic "if fail, try other" skeleton.
+- No cost/latency routing — use the hardcoded provider map toggle for now
+- No multi-tenancy — no user accounts, DB key persistence, or organizations
+- No observability sprawl — no OpenTelemetry, Prometheus, or Grafana; `log.Printf` is enough
+- No response caching — Redis is scoped to rate limiting only
+- No advanced retries — no exponential backoff or circuit breakers; basic error passthrough only
