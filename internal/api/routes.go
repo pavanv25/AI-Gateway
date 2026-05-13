@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 
@@ -33,13 +34,7 @@ func chatHandler(limiter *ratelimit.Limiter, providers map[string]provider.Provi
 
 		p, ok := providers[req.Provider]
 		if !ok {
-			for _, v := range providers {
-				p = v
-				break
-			}
-		}
-		if p == nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "no providers configured"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("unknown provider %q", req.Provider)})
 			return
 		}
 
@@ -100,10 +95,17 @@ func handleStream(
 			_ = limiter.Commit(ctx, apiKey, token, 0)
 			return
 		case event, ok := <-ch:
-			if !ok || event.Done {
-				// TODO: pass actual TotalTokens once StreamEvent carries a Usage field.
-				if err := limiter.Commit(ctx, apiKey, token, 0); err != nil {
-					log.Printf("stream commit error (non-fatal): %v", err)
+			if !ok {
+				_ = limiter.Commit(ctx, apiKey, token, 0)
+				return
+			}
+			if event.Done {
+				actual := 0
+				if event.Usage != nil {
+					actual = event.Usage.TotalTokens
+				}
+				if err := limiter.Commit(ctx, apiKey, token, actual); err != nil {
+					log.Printf("stream commit (non-fatal): %v", err)
 				}
 				return
 			}

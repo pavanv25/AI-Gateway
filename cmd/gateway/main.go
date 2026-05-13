@@ -41,6 +41,18 @@ func main() {
 	providers := map[string]provider.Provider{
 		"mock": provider.NewMockProvider("This is a mock response from the AI gateway."),
 	}
+	if key := os.Getenv("OPENAI_API_KEY"); key != "" {
+		providers["openai"] = provider.NewOpenAIProvider(key)
+		log.Printf("openai provider registered")
+	} else {
+		log.Printf("warn: OPENAI_API_KEY not set — openai provider disabled")
+	}
+	if key := os.Getenv("ANTHROPIC_API_KEY"); key != "" {
+		providers["anthropic"] = provider.NewAnthropicProvider(key)
+		log.Printf("anthropic provider registered")
+	} else {
+		log.Printf("warn: ANTHROPIC_API_KEY not set — anthropic provider disabled")
+	}
 
 	r := gin.Default()
 	r.GET("/health", func(c *gin.Context) {

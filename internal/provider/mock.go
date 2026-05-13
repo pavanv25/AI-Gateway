@@ -55,7 +55,14 @@ func (m *MockProvider) ChatStream(ctx context.Context, req *models.ChatRequest) 
 			}
 			ch <- models.StreamEvent{ID: fmt.Sprintf("mock-%d", i), Delta: delta}
 		}
-		ch <- models.StreamEvent{Done: true}
+		ch <- models.StreamEvent{
+			Done: true,
+			Usage: &models.Usage{
+				PromptTokens:     10,
+				CompletionTokens: len(words),
+				TotalTokens:      10 + len(words),
+			},
+		}
 	}()
 	return ch, nil
 }

@@ -37,4 +37,5 @@ type StreamEvent struct {
 	ID    string `json:"id"`
 	Delta string `json:"delta"`
 	Done  bool   `json:"done"`
+	Usage *Usage `json:"usage,omitempty"`
 }
