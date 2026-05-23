@@ -21,34 +21,23 @@ Environment variables:
 ## Project Layout
 
 ```
-cmd/gateway/          entry point — wires Redis, Limiter, providers, Gin router
+cmd/gateway/              entry point — wires Redis, Limiter, providers, Gin router
 internal/
-  api/routes.go       RegisterRoutes; POST /v1/chat handler (non-streaming + SSE)
+  api/routes.go           RegisterRoutes; POST /v1/chat handler (non-streaming + SSE)
   provider/
-    provider.go       Provider interface (Chat, ChatStream, Name)
-    mock.go           MockProvider — word-by-word streaming, no external calls
+    provider.go           Provider interface (Chat, ChatStream, Name)
+    mock.go               MockProvider — word-by-word streaming, no external calls
     mock_test.go
+    openai.go             OpenAI provider (Chat + ChatStream via openai-go SDK)
+    openai_test.go
+    anthropic.go          Anthropic provider (Chat + ChatStream via anthropic-sdk-go)
+    anthropic_test.go
   ratelimit/
-    limiter.go        Sliding-window TPM limiter (Redis sorted set + Lua scripts)
-    middleware.go     AuthMiddleware — extracts X-API-Key header, 401 if absent
-    limiter_test.go   8 unit tests via miniredis
-pkg/models/models.go  ChatRequest, ChatResponse, Choice, Usage, StreamEvent
+    limiter.go            Sliding-window TPM limiter (Redis sorted set + Lua scripts)
+    middleware.go         AuthMiddleware — extracts X-API-Key header, 401 if absent
+    limiter_test.go
+pkg/models/models.go      ChatRequest, ChatResponse, Choice, Usage, StreamEvent
 ```
-
-## What's Built
-
-- **Provider interface** — `Chat` (blocking) + `ChatStream` (returns `<-chan StreamEvent`, producer closes)
-- **MockProvider** — implements Provider; streams word-by-word; respects context cancellation
-- **Rate limiter** — sliding 60-second window keyed on `X-API-Key`; `Reserve` atomically checks capacity and records `max_tokens`; `Commit` corrects to actual token count after response
-- **POST /v1/chat** — parses `ChatRequest`, reserves tokens, calls provider, commits actual usage, returns JSON or SSE stream
-- **GET /health** — unauthenticated liveness check
-
-## What's Next
-
-- `internal/provider/openai.go` — implement `Provider` for OpenAI (`/v1/chat/completions`)
-- `internal/provider/anthropic.go` — implement `Provider` for Anthropic (`/v1/messages`)
-- Wire `StreamEvent` `Usage` field so streaming `Commit` uses actual tokens (currently commits 0)
-- Provider selector logic (beyond the current first-found fallback)
 
 ## Scaffolding Rules
 
@@ -64,3 +53,7 @@ pkg/models/models.go  ChatRequest, ChatResponse, Choice, Usage, StreamEvent
 - No observability sprawl — no OpenTelemetry, Prometheus, or Grafana; `log.Printf` is enough
 - No response caching — Redis is scoped to rate limiting only
 - No advanced retries — no exponential backoff or circuit breakers; basic error passthrough only
+
+---
+
+For active development state — what's done, what's in progress, and what's next — see [PROGRESS.md](./PROGRESS.md).
