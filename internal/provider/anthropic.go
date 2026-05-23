@@ -2,7 +2,7 @@ package provider
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
@@ -10,6 +10,14 @@ import (
 	"github.com/anthropics/anthropic-sdk-go/packages/param"
 	"github.com/pavanv25/ai-gateway/pkg/models"
 )
+
+func wrapAnthropicError(err error) error {
+	var apiErr *anthropic.Error
+	if errors.As(err, &apiErr) {
+		return &ProviderError{StatusCode: apiErr.StatusCode, Cause: err}
+	}
+	return err
+}
 
 const anthropicDefaultMaxTokens = 1024
 
@@ -63,7 +71,7 @@ func (p *AnthropicProvider) Chat(ctx context.Context, req *models.ChatRequest) (
 
 	msg, err := p.client.Messages.New(ctx, msgParams)
 	if err != nil {
-		return nil, fmt.Errorf("anthropic chat: %w", err)
+		return nil, wrapAnthropicError(err)
 	}
 
 	var sb strings.Builder
@@ -141,6 +149,10 @@ func (p *AnthropicProvider) ChatStream(ctx context.Context, req *models.ChatRequ
 				}
 				sentDone = true
 			}
+		}
+		if err := stream.Err(); err != nil && !sentDone {
+			ch <- models.StreamEvent{Done: true, Err: wrapAnthropicError(err)}
+			sentDone = true
 		}
 		if !sentDone {
 			ch <- models.StreamEvent{Done: true}

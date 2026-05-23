@@ -17,15 +17,23 @@ go mod tidy                   # sync dependencies
 Environment variables:
 - `TPM_LIMIT` — tokens per minute cap, default `60000`
 - `REDIS_URL` — Redis connection string, default `redis://localhost:6379`
+- `OPENAI_API_KEY` — enables the OpenAI provider (optional)
+- `ANTHROPIC_API_KEY` — enables the Anthropic provider (optional)
+- `ALIAS_CONFIG` — path to a YAML alias config file (optional; alias feature disabled if unset)
 
 ## Project Layout
 
 ```
-cmd/gateway/              entry point — wires Redis, Limiter, providers, Gin router
+cmd/gateway/              entry point — wires Redis, Limiter, providers, alias resolver, Gin router
+config/
+  aliases.example.yaml    example alias config; copy and set ALIAS_CONFIG to use
 internal/
-  api/routes.go           RegisterRoutes; POST /v1/chat handler (non-streaming + SSE)
+  alias/
+    alias.go              Resolver — loads YAML, maps task names to ordered Entry lists
+    alias_test.go
+  api/routes.go           RegisterRoutes; POST /v1/chat handler with fallback loop
   provider/
-    provider.go           Provider interface (Chat, ChatStream, Name)
+    provider.go           Provider interface + ProviderError + IsRetriable
     mock.go               MockProvider — word-by-word streaming, no external calls
     mock_test.go
     openai.go             OpenAI provider (Chat + ChatStream via openai-go SDK)
@@ -36,7 +44,7 @@ internal/
     limiter.go            Sliding-window TPM limiter (Redis sorted set + Lua scripts)
     middleware.go         AuthMiddleware — extracts X-API-Key header, 401 if absent
     limiter_test.go
-pkg/models/models.go      ChatRequest, ChatResponse, Choice, Usage, StreamEvent
+pkg/models/models.go      ChatRequest (+ Task), ChatResponse (+ ResolvedProvider), StreamEvent
 ```
 
 ## Scaffolding Rules
@@ -52,7 +60,7 @@ pkg/models/models.go      ChatRequest, ChatResponse, Choice, Usage, StreamEvent
 - No multi-tenancy — no user accounts, DB key persistence, or organizations
 - No observability sprawl — no OpenTelemetry, Prometheus, or Grafana; `log.Printf` is enough
 - No response caching — Redis is scoped to rate limiting only
-- No advanced retries — no exponential backoff or circuit breakers; basic error passthrough only
+- No advanced retries — no exponential backoff or circuit breakers; alias failover is a linear ordered fallback only
 
 ---
 

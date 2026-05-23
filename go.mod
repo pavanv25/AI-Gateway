@@ -13,6 +13,8 @@ require (
 
 require github.com/alicebob/miniredis/v2 v2.34.0 // test-only
 
+require gopkg.in/yaml.v3 v3.0.1
+
 require (
 	github.com/alicebob/gopher-json v0.0.0-20230218143504-906a9b012302 // indirect
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
@@ -58,5 +60,4 @@ require (
 	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
 	google.golang.org/protobuf v1.36.10 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

@@ -2,12 +2,20 @@ package provider
 
 import (
 	"context"
-	"fmt"
+	"errors"
 
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
 	"github.com/pavanv25/ai-gateway/pkg/models"
 )
+
+func wrapOpenAIError(err error) error {
+	var apiErr *openai.Error
+	if errors.As(err, &apiErr) {
+		return &ProviderError{StatusCode: apiErr.StatusCode, Cause: err}
+	}
+	return err
+}
 
 type OpenAIProvider struct {
 	client *openai.Client
@@ -50,7 +58,7 @@ func (p *OpenAIProvider) Chat(ctx context.Context, req *models.ChatRequest) (*mo
 
 	completion, err := p.client.Chat.Completions.New(ctx, params)
 	if err != nil {
-		return nil, fmt.Errorf("openai chat: %w", err)
+		return nil, wrapOpenAIError(err)
 	}
 
 	choices := make([]models.Choice, len(completion.Choices))
@@ -117,6 +125,10 @@ func (p *OpenAIProvider) ChatStream(ctx context.Context, req *models.ChatRequest
 			if delta := chunk.Choices[0].Delta.Content; delta != "" {
 				ch <- models.StreamEvent{ID: chunk.ID, Delta: delta}
 			}
+		}
+		if err := stream.Err(); err != nil && !sentDone {
+			ch <- models.StreamEvent{Done: true, Err: wrapOpenAIError(err)}
+			sentDone = true
 		}
 		if !sentDone {
 			ch <- models.StreamEvent{Done: true}

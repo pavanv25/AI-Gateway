@@ -6,19 +6,21 @@ type Message struct {
 }
 
 type ChatRequest struct {
-	Provider    string   `json:"provider"`
-	Model       string   `json:"model"`
+	Provider    string    `json:"provider"`
+	Model       string    `json:"model"`
+	Task        string    `json:"task,omitempty"`
 	Messages    []Message `json:"messages"`
-	Stream      bool     `json:"stream"`
-	MaxTokens   int      `json:"max_tokens,omitempty"`
-	Temperature *float64 `json:"temperature,omitempty"`
+	Stream      bool      `json:"stream"`
+	MaxTokens   int       `json:"max_tokens,omitempty"`
+	Temperature *float64  `json:"temperature,omitempty"`
 }
 
 type ChatResponse struct {
-	ID      string   `json:"id"`
-	Model   string   `json:"model"`
-	Choices []Choice `json:"choices"`
-	Usage   Usage    `json:"usage"`
+	ID               string   `json:"id"`
+	Model            string   `json:"model"`
+	Choices          []Choice `json:"choices"`
+	Usage            Usage    `json:"usage"`
+	ResolvedProvider string   `json:"resolved_provider,omitempty"`
 }
 
 type Choice struct {
@@ -38,4 +40,5 @@ type StreamEvent struct {
 	Delta string `json:"delta"`
 	Done  bool   `json:"done"`
 	Usage *Usage `json:"usage,omitempty"`
+	Err   error  `json:"-"`
 }
