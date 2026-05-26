@@ -10,6 +10,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/pavanv25/ai-gateway/internal/alias"
 	"github.com/pavanv25/ai-gateway/internal/api"
+	"github.com/pavanv25/ai-gateway/internal/cache"
 	"github.com/pavanv25/ai-gateway/internal/provider"
 	"github.com/pavanv25/ai-gateway/internal/ratelimit"
 )
@@ -65,11 +66,36 @@ func main() {
 		log.Printf("alias feature disabled (ALIAS_CONFIG not set)")
 	}
 
+	var semanticCache cache.Cache
+	qdrantURL := os.Getenv("QDRANT_URL")
+	openAIKey := os.Getenv("OPENAI_API_KEY")
+	if qdrantURL != "" && openAIKey != "" {
+		cacheTTL := int64(3600)
+		if raw := os.Getenv("CACHE_TTL"); raw != "" {
+			if v, err := strconv.ParseInt(raw, 10, 64); err == nil && v > 0 {
+				cacheTTL = v
+			} else {
+				log.Printf("warn: invalid CACHE_TTL %q, using default %d", raw, cacheTTL)
+			}
+		}
+		sc, err := cache.New(openAIKey, qdrantURL, os.Getenv("QDRANT_API_KEY"), cacheTTL)
+		if err != nil {
+			log.Printf("warn: semantic cache disabled — init failed: %v", err)
+		} else {
+			semanticCache = sc
+			log.Printf("semantic cache enabled (qdrant=%s ttl=%ds)", qdrantURL, cacheTTL)
+		}
+	} else if qdrantURL == "" {
+		log.Printf("semantic cache disabled (QDRANT_URL not set)")
+	} else {
+		log.Printf("semantic cache disabled (OPENAI_API_KEY not set — needed for embeddings)")
+	}
+
 	r := gin.Default()
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
-	api.RegisterRoutes(r, limiter, providers, resolver)
+	api.RegisterRoutes(r, limiter, providers, resolver, semanticCache)
 
 	log.Printf("starting gateway on :8080 tpm_limit=%d redis=%s", tpmLimit, redisURL)
 	if err := r.Run(":8080"); err != nil {

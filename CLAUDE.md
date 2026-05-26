@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 ## Project Overview
 
 Go-based AI Gateway that routes requests between multiple LLM providers (OpenAI, Anthropic) through a unified API. Enforces per-API-key token-per-minute rate limiting via Redis.
@@ -7,12 +9,15 @@ Go-based AI Gateway that routes requests between multiple LLM providers (OpenAI,
 ## Key Commands
 
 ```bash
-go run ./cmd/gateway          # run the server (port 8080)
+go run ./cmd/gateway                                     # run the server (port 8080)
 go build -o bin/gateway ./cmd/gateway
-go test ./...                 # all tests (no external Redis needed — miniredis)
-go test ./internal/ratelimit/... -v -race
-go mod tidy                   # sync dependencies
+go test ./...                                            # all tests (no external Redis needed — miniredis)
+go test ./internal/ratelimit/... -v -race                # single package with race detector
+go test ./internal/provider/... -run TestMockProvider -v # single test by name
+go mod tidy
 ```
+
+Endpoints: `POST /v1/chat` (requires `X-API-Key` header), `GET /health`.
 
 Environment variables:
 - `TPM_LIMIT` — tokens per minute cap, default `60000`
@@ -46,6 +51,22 @@ internal/
     limiter_test.go
 pkg/models/models.go      ChatRequest (+ Task), ChatResponse (+ ResolvedProvider), StreamEvent
 ```
+
+## Request Lifecycle
+
+Every `POST /v1/chat` passes through these stages in order:
+
+1. **Auth** (`ratelimit.AuthMiddleware`) — extracts `X-API-Key`; 401 if absent. Key is stored in Gin context under `ratelimit.APIKeyContextKey`.
+2. **Entry resolution** (`resolveEntries`) — if `task` is set, `alias.Resolver.Resolve` returns an ordered `[]alias.Entry{provider, model}`. If `task` is absent, a single entry is built from `provider`+`model` fields directly.
+3. **Fallback loop** (per entry, in order):
+   - `limiter.Reserve` — atomically checks sliding-window capacity and writes a reservation (`id:maxTokens` member) to the Redis sorted set. Returns `ErrLimitExceeded` (→ 429) or an opaque token.
+   - `p.Chat` / `p.ChatStream` — calls the upstream provider.
+   - On success: `limiter.Commit` replaces the reservation with actual token count. Response includes `resolved_provider`.
+   - On retriable error (5xx, HTTP 429): Commit 0 tokens, log, advance to next entry.
+   - On non-retriable error (4xx, context cancel): break immediately.
+4. **Streaming failover constraint** — SSE headers are flushed lazily on the first content delta. Failover to the next entry is only possible if the error occurs *before* any content is sent to the client (`contentSent` flag in `handleStreamWithFallback`).
+
+The `mock` provider is always registered (no API key needed) and is the only provider available without env vars — useful for local testing.
 
 ## Scaffolding Rules
 
