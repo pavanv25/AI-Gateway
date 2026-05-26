@@ -21,6 +21,7 @@ type ChatResponse struct {
 	Choices          []Choice `json:"choices"`
 	Usage            Usage    `json:"usage"`
 	ResolvedProvider string   `json:"resolved_provider,omitempty"`
+	CacheHit         bool     `json:"cache_hit,omitempty"`
 }
 
 type Choice struct {
