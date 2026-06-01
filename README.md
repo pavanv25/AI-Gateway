@@ -4,7 +4,7 @@ A Go-based API gateway that routes requests to multiple LLM providers through a 
 
 ## Architecture
 
-```
+```bash
 POST /v1/chat  →  AuthMiddleware  →  Semantic Cache (Lookup)
                                            │
                                     hit ───┘  miss ──→  resolveEntries  →  Fallback Loop:
@@ -16,6 +16,7 @@ POST /v1/chat  →  AuthMiddleware  →  Semantic Cache (Lookup)
 ```
 
 **Provider interface** (`internal/provider/provider.go`):
+
 ```go
 type Provider interface {
     Chat(ctx context.Context, req *models.ChatRequest) (*models.ChatResponse, error)
@@ -27,7 +28,7 @@ type Provider interface {
 ## What's Built
 
 | Component | Description |
-|---|---|
+| --- | --- |
 | `POST /v1/chat` | Unified chat endpoint — JSON response or SSE stream |
 | `GET /health` | Unauthenticated liveness probe |
 | **Rate limiter** | Sliding 60-second window per `X-API-Key`; `Reserve` holds `max_tokens`, `Commit` corrects to actual usage |
@@ -40,7 +41,7 @@ type Provider interface {
 
 ## Project Layout
 
-```
+```text
 cmd/gateway/              entry point — wires Redis, Limiter, providers, alias resolver, cache, Gin router
 config/
   aliases.example.yaml    example alias config; copy and set ALIAS_CONFIG to use
@@ -75,7 +76,7 @@ go test ./...
 **Environment variables:**
 
 | Variable | Default | Description |
-|---|---|---|
+| --- | --- | --- |
 | `REDIS_URL` | `redis://localhost:6379` | Redis connection |
 | `TPM_LIMIT` | `60000` | Tokens per minute per API key |
 | `OPENAI_API_KEY` | — | Enables the OpenAI provider (also required for semantic cache embeddings) |
