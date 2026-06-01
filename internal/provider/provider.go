@@ -23,6 +23,11 @@ type ProviderError struct {
 func (e *ProviderError) Error() string { return e.Cause.Error() }
 func (e *ProviderError) Unwrap() error { return e.Cause }
 
+// ErrCircuitOpen is returned by a CircuitBreaker when the circuit is open and
+// no real provider call is made. IsRetriable treats it as retriable so the
+// fallback loop skips to the next alias entry.
+var ErrCircuitOpen = errors.New("circuit breaker open")
+
 // IsRetriable reports whether err should trigger failover to the next entry
 // in a task's fallback list. Returns true for HTTP 429, any 5xx, or
 // network-level errors. Returns false for context cancellation and other 4xx.
@@ -32,6 +37,9 @@ func IsRetriable(err error) bool {
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
+	}
+	if errors.Is(err, ErrCircuitOpen) {
+		return true
 	}
 	var pe *ProviderError
 	if errors.As(err, &pe) {
