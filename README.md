@@ -34,7 +34,8 @@ type Provider interface {
 | **Rate limiter** | Sliding 60-second window per `X-API-Key`; `Reserve` holds `max_tokens`, `Commit` corrects to actual usage |
 | **Semantic cache** | Embeds prompts via OpenAI, stores/retrieves responses in Qdrant by cosine similarity (threshold 0.95); per-tenant isolation via hashed API key; configurable TTL |
 | **Task-based aliasing** | `task` field resolves to an ordered provider/model fallback list from a YAML config |
-| **Fallback loop** | On retriable error (5xx/429), advances to the next alias entry; 4xx fails immediately |
+| **Fallback loop** | On retriable error (5xx/429), advances to the next alias entry; 4xx fails immediately. Circuit-open providers are skipped without a real call. |
+| **Circuit breaker** | Per-provider 3-state machine (Closed/Open/HalfOpen); trips on consecutive 5xx, 429, or network errors; configurable threshold and cooldown |
 | **OpenAI provider** | Calls `/v1/chat/completions`; supports streaming |
 | **Anthropic provider** | Calls `/v1/messages`; supports streaming |
 | **Mock provider** | Word-by-word streaming, no external calls — used in tests |
@@ -53,7 +54,8 @@ internal/
     cache.go              Cache interface
     semantic.go           SemanticCache — OpenAI embeddings + Qdrant REST
   provider/
-    provider.go           Provider interface + ProviderError + IsRetriable
+    provider.go           Provider interface + ProviderError + IsRetriable + ErrCircuitOpen
+    circuit.go            CircuitBreaker — 3-state Provider wrapper
     openai.go             OpenAI implementation
     anthropic.go          Anthropic implementation
     mock.go               MockProvider for testing
@@ -85,6 +87,8 @@ go test ./...
 | `QDRANT_URL` | — | Qdrant REST endpoint; semantic cache disabled if unset |
 | `QDRANT_API_KEY` | — | Qdrant Cloud auth token (optional) |
 | `CACHE_TTL` | `3600` | Semantic cache entry lifetime in seconds |
+| `CB_FAILURE_THRESHOLD` | — | Consecutive failures (5xx, 429, network) before opening a circuit breaker per provider; unset or `0` disables circuit breakers |
+| `CB_COOLDOWN_SECONDS` | `60` | Seconds a circuit stays Open before allowing a single probe (requires `CB_FAILURE_THRESHOLD` to be set) |
 
 ## Usage
 

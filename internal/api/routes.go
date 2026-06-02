@@ -177,7 +177,11 @@ func handleChatWithFallback(
 				break
 			}
 			if i < len(entries)-1 {
-				log.Printf("alias: attempt %d/%d failed (%v), trying next entry", i+1, len(entries), err)
+				if errors.Is(err, provider.ErrCircuitOpen) {
+					log.Printf("alias: attempt %d/%d skipped — circuit open for %q, trying next entry", i+1, len(entries), entry.Provider)
+				} else {
+					log.Printf("alias: attempt %d/%d failed (%v), trying next entry", i+1, len(entries), err)
+				}
 			}
 			continue
 		}
@@ -252,7 +256,11 @@ func handleStreamWithFallback(
 				break
 			}
 			if i < len(entries)-1 {
-				log.Printf("alias: stream attempt %d/%d failed to start (%v), trying next", i+1, len(entries), err)
+				if errors.Is(err, provider.ErrCircuitOpen) {
+					log.Printf("alias: stream attempt %d/%d skipped — circuit open for %q, trying next", i+1, len(entries), entry.Provider)
+				} else {
+					log.Printf("alias: stream attempt %d/%d failed to start (%v), trying next", i+1, len(entries), err)
+				}
 			}
 			continue
 		}
@@ -289,7 +297,11 @@ func handleStreamWithFallback(
 						lastErr = event.Err
 						retry = ctx.Err() == nil && provider.IsRetriable(event.Err)
 						if retry && i < len(entries)-1 {
-							log.Printf("alias: stream attempt %d/%d failed before content (%v), trying next", i+1, len(entries), event.Err)
+							if errors.Is(event.Err, provider.ErrCircuitOpen) {
+								log.Printf("alias: stream attempt %d/%d skipped — circuit open for %q, trying next", i+1, len(entries), entry.Provider)
+							} else {
+								log.Printf("alias: stream attempt %d/%d failed before content (%v), trying next", i+1, len(entries), event.Err)
+							}
 						}
 						break eventLoop
 					}

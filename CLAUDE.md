@@ -25,6 +25,8 @@ Environment variables:
 - `OPENAI_API_KEY` — enables the OpenAI provider (optional)
 - `ANTHROPIC_API_KEY` — enables the Anthropic provider (optional)
 - `ALIAS_CONFIG` — path to a YAML alias config file (optional; alias feature disabled if unset)
+- `CB_FAILURE_THRESHOLD` — consecutive failures (5xx, 429, network) to open a circuit breaker per provider; unset or `0` disables circuit breakers (opt-in)
+- `CB_COOLDOWN_SECONDS` — seconds a circuit stays Open before allowing a single probe request (default `60` when threshold is set)
 
 ## Project Layout
 
@@ -38,7 +40,8 @@ internal/
     alias_test.go
   api/routes.go           RegisterRoutes; POST /v1/chat handler with fallback loop
   provider/
-    provider.go           Provider interface + ProviderError + IsRetriable
+    provider.go           Provider interface + ProviderError + IsRetriable + ErrCircuitOpen
+    circuit.go            CircuitBreaker — 3-state (Closed/Open/HalfOpen) Provider wrapper
     mock.go               MockProvider — word-by-word streaming, no external calls
     mock_test.go
     openai.go             OpenAI provider (Chat + ChatStream via openai-go SDK)
@@ -81,7 +84,7 @@ The `mock` provider is always registered (no API key needed) and is the only pro
 - No multi-tenancy — no user accounts, DB key persistence, or organizations
 - No observability sprawl — no OpenTelemetry, Prometheus, or Grafana; `log.Printf` is enough
 - No response caching — Redis is scoped to rate limiting only
-- No advanced retries — no exponential backoff or circuit breakers; alias failover is a linear ordered fallback only
+- No advanced retries — no exponential backoff; alias fallback with per-provider circuit breakers is the retry strategy
 
 ---
 

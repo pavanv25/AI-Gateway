@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -12,6 +14,7 @@ import (
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
+	"github.com/pavanv25/ai-gateway/internal/alias"
 	"github.com/pavanv25/ai-gateway/internal/provider"
 	"github.com/pavanv25/ai-gateway/internal/ratelimit"
 	"github.com/pavanv25/ai-gateway/pkg/models"
@@ -349,5 +352,62 @@ func TestStreamHandler_CacheMiss_StoresAccumulatedText(t *testing.T) {
 	}
 	if !strings.Contains(content, "hello") {
 		t.Errorf("stored content should contain stream text, got %q", content)
+	}
+}
+
+// circuitOpenProvider simulates a provider whose circuit is open.
+type circuitOpenProvider struct{}
+
+func (p *circuitOpenProvider) Name() string { return "circuit-open" }
+func (p *circuitOpenProvider) Chat(_ context.Context, _ *models.ChatRequest) (*models.ChatResponse, error) {
+	return nil, provider.ErrCircuitOpen
+}
+func (p *circuitOpenProvider) ChatStream(_ context.Context, _ *models.ChatRequest) (<-chan models.StreamEvent, error) {
+	return nil, provider.ErrCircuitOpen
+}
+
+func TestChatHandler_CircuitOpenSkippedFallbackContinues(t *testing.T) {
+	cfgYAML := `tasks:
+  test-task:
+    - provider: circuit-open
+      model: any
+    - provider: mock
+      model: mock
+`
+	cfgFile := filepath.Join(t.TempDir(), "aliases.yaml")
+	if err := os.WriteFile(cfgFile, []byte(cfgYAML), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	resolver, err := alias.Load(cfgFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	limiter := newTestLimiter(t, 10000)
+	providers := map[string]provider.Provider{
+		"circuit-open": &circuitOpenProvider{},
+		"mock":         provider.NewMockProvider("fallback response"),
+	}
+
+	r := gin.New()
+	RegisterRoutes(r, limiter, providers, resolver, nil)
+
+	body := `{"task":"test-task","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp models.ChatResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.ResolvedProvider != "mock" {
+		t.Errorf("expected resolved_provider=mock, got %q", resp.ResolvedProvider)
 	}
 }

@@ -56,6 +56,14 @@ Sliding 60-second window keyed on `X-API-Key` via Redis sorted set + Lua scripts
 
 ---
 
+### Circuit Breaker & Provider Cooldown
+
+- 3-state machine (Closed / Open / HalfOpen) per provider, in-memory, goroutine-safe.
+- Trips on consecutive 5xx, 429, and network errors; context cancellation does not count.
+- `CircuitBreaker` wraps every registered `Provider` transparently via `provider.New(p, cfg)`.
+- `ErrCircuitOpen` is retriable — fallback loop skips to the next alias entry automatically.
+- Configurable via `CB_FAILURE_THRESHOLD` and `CB_COOLDOWN_SECONDS`; opt-in (unset = disabled).
+
 ## Next Steps
 
 - **Alias integration tests** — test that a retriable error on entry 1 falls through to entry 2, and a non-retriable error (400/401) breaks immediately. Wire `MockProvider` so tests run without live API keys.
