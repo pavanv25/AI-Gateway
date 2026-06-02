@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -54,6 +55,29 @@ func main() {
 		log.Printf("anthropic provider registered")
 	} else {
 		log.Printf("warn: ANTHROPIC_API_KEY not set — anthropic provider disabled")
+	}
+
+	if raw := os.Getenv("CB_FAILURE_THRESHOLD"); raw != "" {
+		cbThreshold, err := strconv.Atoi(raw)
+		if err != nil || cbThreshold < 0 {
+			log.Printf("warn: invalid CB_FAILURE_THRESHOLD %q, circuit breakers disabled", raw)
+		} else if cbThreshold > 0 {
+			cbCooldown := 60 * time.Second
+			if cs := os.Getenv("CB_COOLDOWN_SECONDS"); cs != "" {
+				if v, err := strconv.Atoi(cs); err == nil && v > 0 {
+					cbCooldown = time.Duration(v) * time.Second
+				} else {
+					log.Printf("warn: invalid CB_COOLDOWN_SECONDS %q, using default %v", cs, cbCooldown)
+				}
+			}
+			cbCfg := provider.Config{FailureThreshold: cbThreshold, CooldownDuration: cbCooldown}
+			for name, p := range providers {
+				providers[name] = provider.New(p, cbCfg)
+			}
+			log.Printf("circuit breakers enabled: threshold=%d cooldown=%v", cbThreshold, cbCooldown)
+		}
+	} else {
+		log.Printf("circuit breakers disabled (CB_FAILURE_THRESHOLD not set)")
 	}
 
 	resolver, err := alias.Load(os.Getenv("ALIAS_CONFIG"))
