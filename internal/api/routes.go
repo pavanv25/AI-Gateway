@@ -7,10 +7,12 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/pavanv25/ai-gateway/internal/alias"
 	"github.com/pavanv25/ai-gateway/internal/cache"
+	"github.com/pavanv25/ai-gateway/internal/metrics"
 	"github.com/pavanv25/ai-gateway/internal/provider"
 	"github.com/pavanv25/ai-gateway/internal/ratelimit"
 	"github.com/pavanv25/ai-gateway/pkg/models"
@@ -20,16 +22,22 @@ import (
 // limiter, providers, resolver, and c are injected — no global state.
 // resolver may be nil when the alias feature is disabled.
 // c may be nil when the semantic cache is disabled.
-func RegisterRoutes(r *gin.Engine, limiter *ratelimit.Limiter, providers map[string]provider.Provider, resolver *alias.Resolver, c cache.Cache) {
+// collector may be nil, in which case a NoopCollector is used.
+func RegisterRoutes(r *gin.Engine, limiter *ratelimit.Limiter, providers map[string]provider.Provider, resolver *alias.Resolver, c cache.Cache, collector metrics.Collector) {
+	if collector == nil {
+		collector = metrics.NoopCollector{}
+	}
 	v1 := r.Group("/v1")
 	v1.Use(ratelimit.AuthMiddleware())
 	{
-		v1.POST("/chat", chatHandler(limiter, providers, resolver, c))
+		v1.POST("/chat", chatHandler(limiter, providers, resolver, c, collector))
 	}
 }
 
-func chatHandler(limiter *ratelimit.Limiter, providers map[string]provider.Provider, resolver *alias.Resolver, c cache.Cache) gin.HandlerFunc {
+func chatHandler(limiter *ratelimit.Limiter, providers map[string]provider.Provider, resolver *alias.Resolver, c cache.Cache, collector metrics.Collector) gin.HandlerFunc {
 	return func(gc *gin.Context) {
+		requestStart := time.Now()
+
 		var req models.ChatRequest
 		if err := gc.ShouldBindJSON(&req); err != nil {
 			gc.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -49,9 +57,12 @@ func chatHandler(limiter *ratelimit.Limiter, providers map[string]provider.Provi
 		cacheKey, _ := buildCacheKey(&req)
 		apiKeyHash := sha256hex(apiKey)
 		var cacheVector []float64
+		var cacheLatencyMs float64
 
 		if c != nil && cacheKey != "" {
+			cacheLookupStart := time.Now()
 			cached, vec, _ := c.Lookup(ctx, cacheKey, apiKeyHash)
+			cacheLatencyMs = time.Since(cacheLookupStart).Seconds() * 1000
 			cacheVector = vec
 			if cached != nil {
 				// Cache hit: apply token budget (bypasses provider but not rate limit).
@@ -68,6 +79,19 @@ func chatHandler(limiter *ratelimit.Limiter, providers map[string]provider.Provi
 				_ = limiter.Commit(ctx, apiKey, token, cached.Usage.TotalTokens)
 				cached.CacheHit = true
 				cached.ResolvedProvider = "cache"
+				collector.Record(metrics.MetricEvent{
+					Timestamp:        time.Now(),
+					Provider:         "cache",
+					Model:            req.Model,
+					APIKeyHash:       apiKeyHash,
+					PromptTokens:     cached.Usage.PromptTokens,
+					CompletionTokens: cached.Usage.CompletionTokens,
+					TotalTokens:      cached.Usage.TotalTokens,
+					CacheHit:         true,
+					Stream:           req.Stream,
+					RequestLatencyMs: time.Since(requestStart).Seconds() * 1000,
+					CacheLatencyMs:   cacheLatencyMs,
+				})
 				gc.Header("Content-Type", "application/json")
 				gc.JSON(http.StatusOK, cached)
 				return
@@ -75,9 +99,9 @@ func chatHandler(limiter *ratelimit.Limiter, providers map[string]provider.Provi
 		}
 
 		if req.Stream {
-			handleStreamWithFallback(gc, entries, providers, &req, limiter, apiKey, c, cacheKey, apiKeyHash, cacheVector)
+			handleStreamWithFallback(gc, entries, providers, &req, limiter, apiKey, c, cacheKey, apiKeyHash, cacheVector, requestStart, cacheLatencyMs, collector)
 		} else {
-			handleChatWithFallback(gc, entries, providers, &req, limiter, apiKey, c, cacheKey, apiKeyHash, cacheVector)
+			handleChatWithFallback(gc, entries, providers, &req, limiter, apiKey, c, cacheKey, apiKeyHash, cacheVector, requestStart, cacheLatencyMs, collector)
 		}
 	}
 }
@@ -142,6 +166,9 @@ func handleChatWithFallback(
 	c cache.Cache,
 	cacheKey, apiKeyHash string,
 	cacheVector []float64,
+	requestStart time.Time,
+	cacheLatencyMs float64,
+	collector metrics.Collector,
 ) {
 	ctx := gc.Request.Context()
 	var lastErr error
@@ -169,7 +196,10 @@ func handleChatWithFallback(
 			return
 		}
 
+		providerStart := time.Now()
 		resp, err := p.Chat(ctx, &attempt)
+		providerMs := time.Since(providerStart).Seconds() * 1000
+
 		if err != nil {
 			_ = limiter.Commit(ctx, apiKey, token, 0)
 			lastErr = err
@@ -196,6 +226,20 @@ func handleChatWithFallback(
 			c.AsyncStore(cacheKey, apiKeyHash, cacheVector, resp)
 		}
 
+		collector.Record(metrics.MetricEvent{
+			Timestamp:         time.Now(),
+			Provider:          entry.Provider,
+			Model:             attempt.Model,
+			APIKeyHash:        apiKeyHash,
+			PromptTokens:      resp.Usage.PromptTokens,
+			CompletionTokens:  resp.Usage.CompletionTokens,
+			TotalTokens:       resp.Usage.TotalTokens,
+			RequestLatencyMs:  time.Since(requestStart).Seconds() * 1000,
+			ProviderLatencyMs: providerMs,
+			CacheLatencyMs:    cacheLatencyMs,
+			FallbackAttempts:  i,
+		})
+
 		gc.JSON(http.StatusOK, resp)
 		return
 	}
@@ -203,6 +247,16 @@ func handleChatWithFallback(
 	if lastErr == nil {
 		lastErr = errors.New("no available provider for this request")
 	}
+	collector.Record(metrics.MetricEvent{
+		Timestamp:        time.Now(),
+		Provider:         req.Provider,
+		Model:            req.Model,
+		APIKeyHash:       apiKeyHash,
+		RequestLatencyMs: time.Since(requestStart).Seconds() * 1000,
+		CacheLatencyMs:   cacheLatencyMs,
+		FallbackAttempts: len(entries),
+		ErrorType:        "no_provider",
+	})
 	gc.JSON(http.StatusBadGateway, gin.H{"error": lastErr.Error()})
 }
 
@@ -216,6 +270,9 @@ func handleStreamWithFallback(
 	c cache.Cache,
 	cacheKey, apiKeyHash string,
 	cacheVector []float64,
+	requestStart time.Time,
+	cacheLatencyMs float64,
+	collector metrics.Collector,
 ) {
 	ctx := gc.Request.Context()
 	var lastErr error
@@ -248,6 +305,7 @@ func handleStreamWithFallback(
 			return
 		}
 
+		providerStart := time.Now()
 		ch, err := p.ChatStream(ctx, &attempt)
 		if err != nil {
 			_ = limiter.Commit(ctx, apiKey, token, 0)
@@ -332,12 +390,13 @@ func handleStreamWithFallback(
 		}
 
 		if success {
+			providerMs := time.Since(providerStart).Seconds() * 1000
+			usage := models.Usage{}
+			if finalUsage != nil {
+				usage = *finalUsage
+			}
 			// Store the assembled response in cache — best-effort.
 			if c != nil && cacheKey != "" && cacheVector != nil {
-				usage := models.Usage{}
-				if finalUsage != nil {
-					usage = *finalUsage
-				}
 				synthesized := &models.ChatResponse{
 					Model:            attempt.Model,
 					ResolvedProvider: entry.Provider,
@@ -348,6 +407,20 @@ func handleStreamWithFallback(
 				}
 				c.AsyncStore(cacheKey, apiKeyHash, cacheVector, synthesized)
 			}
+			collector.Record(metrics.MetricEvent{
+				Timestamp:         time.Now(),
+				Provider:          entry.Provider,
+				Model:             attempt.Model,
+				APIKeyHash:        apiKeyHash,
+				PromptTokens:      usage.PromptTokens,
+				CompletionTokens:  usage.CompletionTokens,
+				TotalTokens:       usage.TotalTokens,
+				Stream:            true,
+				RequestLatencyMs:  time.Since(requestStart).Seconds() * 1000,
+				ProviderLatencyMs: providerMs,
+				CacheLatencyMs:    cacheLatencyMs,
+				FallbackAttempts:  i,
+			})
 			return
 		}
 		if !retry {
@@ -359,6 +432,17 @@ func handleStreamWithFallback(
 		if lastErr == nil {
 			lastErr = errors.New("no available provider for this request")
 		}
+		collector.Record(metrics.MetricEvent{
+			Timestamp:        time.Now(),
+			Provider:         req.Provider,
+			Model:            req.Model,
+			APIKeyHash:       apiKeyHash,
+			Stream:           true,
+			RequestLatencyMs: time.Since(requestStart).Seconds() * 1000,
+			CacheLatencyMs:   cacheLatencyMs,
+			FallbackAttempts: len(entries),
+			ErrorType:        "no_provider",
+		})
 		gc.JSON(http.StatusBadGateway, gin.H{"error": lastErr.Error()})
 	}
 }

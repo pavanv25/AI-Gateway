@@ -119,7 +119,7 @@ func main() {
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
-	api.RegisterRoutes(r, limiter, providers, resolver, semanticCache)
+	api.RegisterRoutes(r, limiter, providers, resolver, semanticCache, nil)
 
 	log.Printf("starting gateway on :8080 tpm_limit=%d redis=%s", tpmLimit, redisURL)
 	if err := r.Run(":8080"); err != nil {

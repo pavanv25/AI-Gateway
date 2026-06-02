@@ -95,7 +95,7 @@ func newTestRouter(limiter *ratelimit.Limiter, providers map[string]provider.Pro
 	if c != nil {
 		cache = c
 	}
-	RegisterRoutes(r, limiter, providers, nil, cache)
+	RegisterRoutes(r, limiter, providers, nil, cache, nil)
 	return r
 }
 
