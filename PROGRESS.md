@@ -1,58 +1,56 @@
 # PROGRESS.md
 
-Active development state for the AI Gateway. See CLAUDE.md for static technical context.
+Active development state. See CLAUDE.md for static technical context.
 
 ---
 
-## Current Focus
+## Completed
 
-Task-Based Aliasing is shipped. The next priorities are integration tests for the alias fallback path and README documentation for the new `task` field and `ALIAS_CONFIG` env var.
+### Rate Limiting & Auth
 
-## Session — 2026-05-26
+- Sliding 60-second window TPM limiter keyed on `X-API-Key` via Redis sorted
+  set + Lua scripts; `Reserve` atomically checks capacity, `Commit` corrects
+  to actual usage after each response.
+- `AuthMiddleware` extracts `X-API-Key` header; 401 if absent.
 
-- Expanded `CLAUDE.md` with env var documentation (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `ALIAS_CONFIG`), full request lifecycle walkthrough, and updated project layout and scaffolding rules.
-- Opened a second worktree (`eventual-plotting-flask`) for isolated branch experimentation alongside the existing `jovial-payne-a3ecbd` worktree.
-- Extended `.claude/settings.local.json` with additional `Bash` and tool permission allowances to reduce confirmation prompts during build and test workflows.
-- **Next:** write alias integration tests using `MockProvider` — cover entry-1 retriable failure → entry-2 fallback and non-retriable 4xx immediate break.
-- **Next:** document `task` field, `ALIAS_CONFIG`, and `config/aliases.example.yaml` in README; add streaming failover test coverage.
+### Provider Layer
 
----
-
-## Session — 2026-05-23
-
-- Implemented `internal/alias` package: `Resolver` loads a YAML config at startup and maps task names to ordered `[]Entry{provider, model}` lists; `alias_test.go` covers resolve, missing-task, and disabled-resolver cases.
-- Wired alias fallback loop into `internal/api/routes.go`: `resolveEntries` dispatches to alias or direct provider, `handleChatWithFallback` and `handleStreamWithFallback` iterate entries and retry on retriable errors, attaching `resolved_provider` to the response.
-- Added `provider.ProviderError{StatusCode, Cause}` and `IsRetriable` to `provider.go`; OpenAI and Anthropic providers now wrap SDK errors into `*ProviderError` so the handler classifies retriability without importing SDK types.
-- **Next:** write alias integration tests using `MockProvider` to cover entry-1 failure → entry-2 fallback and non-retriable (4xx) immediate break.
-- **Next:** document `task` field, `ALIAS_CONFIG`, and `config/aliases.example.yaml` in README; add streaming failover test coverage.
-
----
-
-## Recent Accomplishments
+- `Provider` interface + `ProviderError{StatusCode, Cause}` + `IsRetriable`
+  in `internal/provider/provider.go`; both OpenAI and Anthropic wrap SDK
+  errors into `*ProviderError` so the handler classifies retriability without
+  importing SDK types.
+- OpenAI provider: `Chat` + `ChatStream` via openai-go SDK; streaming sets
+  `IncludeUsage: true` for a final token-count chunk.
+- Anthropic provider: `Chat` + `ChatStream`; extracts system messages into
+  the top-level `system` field.
+- `MockProvider`: word-by-word streaming, no external calls — always
+  registered, useful for local testing without API keys.
 
 ### Task-Based Aliasing
-Callers can now send `{"task": "fast-chat", ...}` instead of hardcoding a provider and model. The gateway resolves the task name to an ordered `[{provider, model}]` fallback list defined in a YAML config file loaded via `ALIAS_CONFIG` at startup. Automatic failover fires on 5xx or 429 from the upstream provider; 4xx and context cancellation fail immediately. For streaming, failover is only possible before the first content chunk is flushed to the client. The response includes a `resolved_provider` field showing which backend handled the request.
 
-Key files: `internal/alias/alias.go`, `internal/api/routes.go`, `cmd/gateway/main.go`, `config/aliases.example.yaml`.
+- `internal/alias`: `Resolver` loads a YAML config at startup and maps task
+  names to ordered `[]Entry{provider, model}` lists.
+- Callers send `{"task": "fast-chat", ...}`; the gateway resolves to an
+  ordered fallback list via `ALIAS_CONFIG`.
+- Fallback loop in `routes.go`: retriable errors (5xx, 429) advance to the
+  next entry; 4xx or context cancellation breaks immediately.
+- Streaming failover constrained by `contentSent` flag — failover only
+  possible before the first content chunk is flushed.
+- Response includes `resolved_provider` showing which backend handled the
+  request.
 
-### Provider error classification
-Added `provider.ProviderError{StatusCode, Cause}` and `provider.IsRetriable` to `internal/provider/provider.go`. Both OpenAI and Anthropic providers now wrap SDK errors into `*ProviderError` so the handler can classify retriability without importing SDK types. Stream goroutines emit `StreamEvent{Done:true, Err:...}` on `stream.Err()` instead of silently closing the channel.
+### Semantic Caching
 
-### OpenAI and Anthropic providers
-Full `Chat` + `ChatStream` implementations using their official Go SDKs. Anthropic extracts system messages into the top-level `system` field. OpenAI streaming sets `IncludeUsage: true` to capture a final token-count chunk. Both providers are registered conditionally on API key presence at startup.
-
-### Rate limiting and streaming token accounting
-Sliding 60-second window keyed on `X-API-Key` via Redis sorted set + Lua scripts. `Reserve` atomically checks capacity; `Commit` corrects to actual usage after each response. Streaming reads `event.Usage.TotalTokens` from the terminal `Done` event and passes it to `Commit`.
-
----
-
-## Session — 2026-05-26 (later)
-
-- Added `internal/cache` package: `Cache` interface + `SemanticCache` implementation using Qdrant (REST) for vector storage and OpenAI `text-embedding-3-small` for prompt embeddings; `AsyncStore` runs writes on a bounded background goroutine pool.
-- Wired semantic cache into `cmd/gateway/main.go` (enabled when `QDRANT_URL` + `OPENAI_API_KEY` are set) and `internal/api/routes.go` (lookup before rate-limit check; hit returns `resolved_provider: "cache"` and still debits the token budget).
-- Extended `pkg/models/models.go` with `CacheHit bool` on `ChatResponse`; `routes_test.go` added.
-- **Next:** add `QDRANT_URL`, `QDRANT_API_KEY`, and `CACHE_TTL` to `CLAUDE.md` env var table and README.
-- **Next:** write unit tests for `SemanticCache` using a mock HTTP server; cover hit, miss, and store-failure paths.
+- `internal/cache`: `Cache` interface + `SemanticCache` backed by Qdrant
+  (REST) for vector storage and OpenAI `text-embedding-3-small` for prompt
+  embeddings.
+- Similarity threshold 0.95; per-key-hash namespacing; TTL-controlled expiry.
+- `AsyncStore` writes back on the hot path via a bounded 64-slot goroutine
+  semaphore.
+- Cache lookup runs before the rate-limit check in `routes.go`; hits
+  short-circuit provider fallback and return `resolved_provider: "cache"`.
+- `CacheHit bool` added to `ChatResponse` in `pkg/models/models.go`.
+- Enabled when `QDRANT_URL` + `OPENAI_API_KEY` are set; lazy init at startup.
 
 ---
 
@@ -66,105 +64,87 @@ Sliding 60-second window keyed on `X-API-Key` via Redis sorted set + Lua scripts
 
 ## Next Steps
 
-- **Alias integration tests** — test that a retriable error on entry 1 falls through to entry 2, and a non-retriable error (400/401) breaks immediately. Wire `MockProvider` so tests run without live API keys.
-- **README docs** — document the `task` field, `ALIAS_CONFIG` format, and the `config/aliases.example.yaml` file.
-- **Streaming failover tests** — extend mock to simulate errors at configurable points so the streaming fallback path is covered by tests.
+- **Alias integration tests** — `MockProvider` covering entry-1 retriable
+  failure → entry-2 fallback and non-retriable 4xx immediate break.
+- **Streaming failover tests** — cover the `contentSent` guard in
+  `handleStreamWithFallback`.
+- **SemanticCache unit tests** — mock Qdrant HTTP server covering hit, miss,
+  and store-failure paths.
 
-## 2026-05-23 15:45
+---
 
-- Implemented `internal/alias` package with YAML-based task-to-provider resolver
-- Wired chat and streaming fallback loops into `routes.go` with retriable error classification
-- Added `provider.ProviderError` + `IsRetriable` so OpenAI/Anthropic wrap SDK errors uniformly
-- Next: alias integration tests with `MockProvider`, then README docs for the `task` field and `ALIAS_CONFIG`
+## Session Log — 2026-06-01
 
+- Condensed `PROGRESS.md` from ~194 lines to a tighter format; removed stale
+  detail that duplicated `CLAUDE.md`.
+- Updated `CLAUDE.md` with `QDRANT_URL`, `QDRANT_API_KEY`, and `CACHE_TTL`
+  env var entries, closing out the docs next step.
+- Cleaned up leftover worktrees (`cleanup-progress-md`, `readme-semantic-cache`,
+  and others) after merging prior PRs.
+- **Next:** write alias integration tests (`MockProvider` retriable fallback),
+  streaming failover tests (`contentSent` guard), and SemanticCache unit tests
+  (mock Qdrant HTTP server).
 
-## 2026-05-23 15:47
+## Session Log — 2026-06-01 (end of session)
 
-- Captured project-level brainstorm (`brainstorm.md`) documenting MVP scope, high-level request flow, and routing/failover/streaming/rate-limiting design notes.
-- Extended `.claude/settings.local.json` with additional `Bash` and `WebFetch` permission allowances to streamline future build, test, and fetch operations.
-- Created a git worktree (`jovial-payne-a3ecbd`) for isolated branch experimentation; no changes were committed this session.
-- **Next:** write alias integration tests using `MockProvider` covering entry-1 retriable failure → entry-2 fallback and non-retriable 4xx immediate break.
-- **Next:** document `task` field, `ALIAS_CONFIG`, and `config/aliases.example.yaml` in README; add streaming failover test coverage.
-
-
-## 2026-05-26 12:19
-
-- Updated Claude Code project settings (`.claude/settings.local.json`) to configure allowed commands or hooks for this repo.
-- Created and explored a git worktree (`jovial-payne-a3ecbd`) for isolated development; no code changes merged back yet.
-- Expanded `brainstorm.md` with 9 additional lines — likely new routing, failover, or rate-limiting ideas building on the MVP scope.
-- **Next:** write alias integration tests using `MockProvider` covering entry-1 failure → entry-2 fallback and non-retriable 4xx break.
-- **Next:** document the `task` field, `ALIAS_CONFIG` env var, and `config/aliases.example.yaml` in README; add streaming failover test coverage.
-
-
-## 2026-05-26 12:25
-
-- Updated `CLAUDE.md` with expanded layout, full request lifecycle documentation, and environment variable entries for `ALIAS_CONFIG`, `OPENAI_API_KEY`, and `ANTHROPIC_API_KEY` — static context is now accurate and complete.
-- Session tooling configured via `.claude/settings.local.json` (worktree and hook settings for the current project).
-- **Next:** write alias integration tests using `MockProvider` covering entry-1 failure → entry-2 fallback and non-retriable 4xx immediate break.
-- **Next:** add streaming failover test coverage (`contentSent` path in `handleStreamWithFallback`).
-- **Next:** document `task` field, `ALIAS_CONFIG`, and `config/aliases.example.yaml` in README.
+- Cleaned up stale worktrees (`cleanup-progress-md`, `effervescent-foraging-rabbit`, `eventual-plotting-flask`, `jovial-payne-a3ecbd`, `readme-semantic-cache`) left over from merged PRs.
+- Condensed `PROGRESS.md` (~108 lines removed) and updated `CLAUDE.md` with `QDRANT_URL`, `QDRANT_API_KEY`, and `CACHE_TTL` env var docs; no code changes.
+- **Next:** write alias integration tests (`MockProvider` retriable fallback → entry-2 advance, non-retriable 4xx break).
+- **Next:** add streaming failover tests covering the `contentSent` guard in `handleStreamWithFallback`.
+- **Next:** add `SemanticCache` unit tests with a mock Qdrant HTTP server (hit, miss, store-failure paths).
 
 
-## 2026-05-26 (latest)
+## 2026-06-01 16:46
 
-- Refreshed `CLAUDE.md` static docs: added request lifecycle section, corrected project layout, and documented all three env vars (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `ALIAS_CONFIG`).
-- Updated `PROGRESS.md` to reflect completed alias/fallback work and carry forward outstanding next steps.
-- **Next:** write alias integration tests — `MockProvider` covering entry-1 retriable failure → entry-2 fallback and non-retriable 4xx immediate break.
-- **Next:** add streaming failover test coverage for the `contentSent` guard in `handleStreamWithFallback`.
-- **Next:** document `task` field, `ALIAS_CONFIG`, and `config/aliases.example.yaml` in README.
+- Cleaned up stale worktrees from merged PRs and tightened `PROGRESS.md` (~108 lines removed, no code changes).
+- Updated `CLAUDE.md` with `QDRANT_URL`, `QDRANT_API_KEY`, `CACHE_TTL` env var docs.
+- **Next:** alias integration tests (`MockProvider` retriable fallback → entry-2, non-retriable 4xx break), streaming failover tests (`contentSent` guard), and `SemanticCache` unit tests with a mock Qdrant HTTP server.
 
+## 2026-06-01 (end of session)
 
-## 2026-05-26 13:05
-
-PROGRESS.md updated with a new session entry covering the `CLAUDE.md` docs refresh and carrying forward the three outstanding next steps (alias integration tests, streaming failover tests, README docs).
-
-
-## 2026-05-26 14:16
-
-- Updated `CLAUDE.md` with env vars, request lifecycle, and project layout details
-- Opened new `eventual-plotting-flask` worktree for isolated branch work
-- Extended `.claude/settings.local.json` permissions to reduce build/test prompts
-- **Next:** alias integration tests with `MockProvider` (retriable fallback + non-retriable 4xx break)
-- **Next:** README docs for `task` field, `ALIAS_CONFIG`, and streaming failover test coverage
+- Reformatted `CLAUDE.md`: replaced free-form prose with structured Tech Stack list, expanded Project Layout to include `cache/` and missing `_test.go` files, added env var table with `QDRANT_URL`, `QDRANT_API_KEY`, and `CACHE_TTL`.
+- Condensed `PROGRESS.md` by ~108 lines; removed stale detail already captured in `CLAUDE.md`.
+- Removed five stale worktrees (`cleanup-progress-md`, `effervescent-foraging-rabbit`, `eventual-plotting-flask`, `jovial-payne-a3ecbd`, `readme-semantic-cache`) left over from merged PRs.
+- **Next:** alias integration tests — `MockProvider` retriable fallback advancing to entry-2, non-retriable 4xx breaking immediately.
+- **Next:** streaming failover tests (`contentSent` guard) and `SemanticCache` unit tests with a mock Qdrant HTTP server.
 
 
-## 2026-05-26 14:29
+## 2026-06-01 16:54
 
-PROGRESS.md updated with a 5-bullet session entry covering the semantic cache implementation and next steps.
+PROGRESS.md updated with a 5-bullet session entry covering the `CLAUDE.md` restructure, `PROGRESS.md` condensation, worktree cleanup, and the three pending test gaps.
 
+## 2026-06-01 (latest)
 
-## 2026-05-26 (session end)
-
-- Shipped `internal/cache` package: `Cache` interface + `SemanticCache` backed by Qdrant (REST) and OpenAI `text-embedding-3-small`; `AsyncStore` uses a bounded semaphore to avoid blocking the hot path.
-- Wired semantic cache into `cmd/gateway/main.go` (initialised when `QDRANT_URL` + `OPENAI_API_KEY` are present) and `internal/api/routes.go` (lookup before rate-limit check; hits return `resolved_provider: "cache"` and still debit the token budget).
-- Extended `pkg/models/models.go` with `CacheHit bool` on `ChatResponse`; added `routes_test.go` for handler-level coverage.
-- **Next:** add `QDRANT_URL`, `QDRANT_API_KEY`, and `CACHE_TTL` to `CLAUDE.md` env var table and README.
-- **Next:** write `SemanticCache` unit tests using a mock HTTP server covering hit, miss, and store-failure paths.
-
-
-## 2026-05-26 14:37
-
-- Added `internal/cache` package (`Cache` interface + `SemanticCache` via Qdrant + OpenAI embeddings), wired into the gateway with lazy initialisation on `QDRANT_URL`.
-- Extended `ChatResponse` with `CacheHit bool`; handler now checks cache before rate-limit and returns `resolved_provider: "cache"` on hits.
-- Next: document `QDRANT_URL`/`QDRANT_API_KEY`/`CACHE_TTL` in `CLAUDE.md` and README, then write `SemanticCache` unit tests with a mock HTTP server.
+- Reformatted `CLAUDE.md` into structured Tech Stack + env var table; expanded Project Layout to include `cache/` and `_test.go` files.
+- Condensed `PROGRESS.md` by ~108 lines, removing stale session noise that duplicated static docs.
+- Removed five merged-PR worktrees (`cleanup-progress-md`, `effervescent-foraging-rabbit`, `eventual-plotting-flask`, `jovial-payne-a3ecbd`, `readme-semantic-cache`).
+- **Next:** alias integration tests — `MockProvider` retriable fallback → entry-2 advance, non-retriable 4xx break.
+- **Next:** streaming failover tests (`contentSent` guard) and `SemanticCache` unit tests with a mock Qdrant HTTP server.
 
 
-## 2026-05-26 14:46
+## 2026-06-01 16:55
 
-Here are the bullet points for the new PROGRESS.md section:
-
-- Added `internal/cache` package: `SemanticCache` implements a `Cache` interface backed by Qdrant (REST) for vector storage and OpenAI `text-embedding-3-small` for prompt embeddings; similarity threshold 0.95 with per-key-hash namespacing and TTL-controlled expiry.
-- Wired semantic cache into `cmd/gateway/main.go` and `internal/api/routes.go`: cache lookup runs before the provider fallback loop; `AsyncStore` writes hits back on the hot path via a bounded 64-slot goroutine semaphore.
-- Extended `pkg/models/models.go` with a `CacheHit` flag on `ChatResponse`; added `semantic_test.go` covering embed, store, lookup-hit, and lookup-miss paths against a mock Qdrant server.
-- **Next:** add `QDRANT_URL`, `QDRANT_API_KEY`, and cache TTL env vars to `CLAUDE.md` and README; document `cache_hit` in the response schema.
-- **Next:** write integration test for the full cache → provider fallback path; confirm streaming responses bypass cache correctly.
+- Reformatted `CLAUDE.md` into structured Tech Stack + env var table; expanded Project Layout to include `cache/` and `_test.go` files.
+- Condensed `PROGRESS.md` by ~108 lines, removing stale session noise that duplicated static docs.
+- Removed five merged-PR worktrees (`cleanup-progress-md`, `effervescent-foraging-rabbit`, `eventual-plotting-flask`, `jovial-payne-a3ecbd`, `readme-semantic-cache`).
+- **Next:** alias integration tests — `MockProvider` retriable fallback → entry-2 advance, non-retriable 4xx break.
+- **Next:** streaming failover tests (`contentSent` guard) and `SemanticCache` unit tests with a mock Qdrant HTTP server.
 
 
-## 2026-05-26 14:50
+## 2026-06-01 16:57
 
-- Shipped `internal/cache` package: `Cache` interface + `SemanticCache` backed by Qdrant (REST) and OpenAI `text-embedding-3-small` embeddings; `AsyncStore` uses a bounded goroutine semaphore for non-blocking hot-path writes.
-- Wired cache into `cmd/gateway/main.go` (lazy init on `QDRANT_URL`) and `internal/api/routes.go` (lookup before rate-limit check; hits short-circuit provider fallback and return `resolved_provider: "cache"`).
-- Extended `pkg/models/models.go` with `CacheHit bool` on `ChatResponse`; added `routes_test.go` for handler-level coverage and `semantic_test.go` with mock Qdrant server covering hit, miss, and embed paths.
-- **Next:** document `QDRANT_URL`, `QDRANT_API_KEY`, and `CACHE_TTL` env vars in `CLAUDE.md` and README; add `cache_hit` to response schema docs.
-- **Next:** write integration test for the full cache → provider fallback path; confirm streaming responses bypass the cache lookup correctly.
+- Restructured `CLAUDE.md` with a Tech Stack list, expanded Project Layout (added `cache/`, `_test.go` entries), and an env var table covering `QDRANT_URL`, `QDRANT_API_KEY`, and `CACHE_TTL`.
+- Condensed `PROGRESS.md` by ~108 lines, removing duplicated session noise already captured in static docs.
+- Removed five stale worktrees (`cleanup-progress-md`, `effervescent-foraging-rabbit`, `eventual-plotting-flask`, `jovial-payne-a3ecbd`, `readme-semantic-cache`) left over from merged PRs.
+- **Next:** alias integration tests — `MockProvider` retriable fallback advancing to entry-2, non-retriable 4xx breaking immediately.
+- **Next:** streaming failover tests (`contentSent` guard) and `SemanticCache` unit tests with a mock Qdrant HTTP server (hit, miss, store-failure paths).
+
+
+## 2026-06-01 17:52
+
+- Instrumented `chatHandler` and fallback handlers with `metrics.Collector` — emits `MetricEvent` on every cache hit and provider response, capturing latency (`RequestLatencyMs`, `CacheLatencyMs`, `ProviderLatencyMs`), token counts, and stream flag.
+- Added `NoopCollector{}` as a zero-value fallback in `RegisterRoutes` so a nil collector is safe without callers changing.
+- Started `circuit-breaker` worktree — pattern suggests per-provider open/half-open/closed state to stop retrying persistently failing backends.
+- **Next:** implement a `metrics.Exporter` (Prometheus or log-based) that consumes `MetricEvent` from `Collector`; wire into `cmd/gateway/main.go`.
+- **Next:** finish circuit breaker in the open worktree and add alias integration tests covering `MockProvider` retriable fallback → entry-2 advance and non-retriable 4xx break.
 

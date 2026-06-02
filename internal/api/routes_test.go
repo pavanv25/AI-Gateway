@@ -391,7 +391,7 @@ func TestChatHandler_CircuitOpenSkippedFallbackContinues(t *testing.T) {
 	}
 
 	r := gin.New()
-	RegisterRoutes(r, limiter, providers, resolver, nil)
+	RegisterRoutes(r, limiter, providers, resolver, nil, nil)
 
 	body := `{"task":"test-task","messages":[{"role":"user","content":"hello"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat", strings.NewReader(body))
