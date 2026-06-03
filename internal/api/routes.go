@@ -82,7 +82,7 @@ func chatHandler(limiter *ratelimit.Limiter, providers map[string]provider.Provi
 				collector.Record(metrics.MetricEvent{
 					Timestamp:        time.Now(),
 					Provider:         "cache",
-					Model:            req.Model,
+					Model:            cached.Model,
 					APIKeyHash:       apiKeyHash,
 					PromptTokens:     cached.Usage.PromptTokens,
 					CompletionTokens: cached.Usage.CompletionTokens,
@@ -91,6 +91,7 @@ func chatHandler(limiter *ratelimit.Limiter, providers map[string]provider.Provi
 					Stream:           req.Stream,
 					RequestLatencyMs: time.Since(requestStart).Seconds() * 1000,
 					CacheLatencyMs:   cacheLatencyMs,
+					CostUSD:          metrics.EstimateCost(cached.ResolvedProvider, cached.Model, cached.Usage.PromptTokens, cached.Usage.CompletionTokens),
 				})
 				gc.Header("Content-Type", "application/json")
 				gc.JSON(http.StatusOK, cached)
@@ -238,6 +239,7 @@ func handleChatWithFallback(
 			ProviderLatencyMs: providerMs,
 			CacheLatencyMs:    cacheLatencyMs,
 			FallbackAttempts:  i,
+			CostUSD:           metrics.EstimateCost(entry.Provider, attempt.Model, resp.Usage.PromptTokens, resp.Usage.CompletionTokens),
 		})
 
 		gc.JSON(http.StatusOK, resp)
@@ -407,6 +409,8 @@ func handleStreamWithFallback(
 				}
 				c.AsyncStore(cacheKey, apiKeyHash, cacheVector, synthesized)
 			}
+			// CostUSD is 0 when the provider closes the stream without sending
+			// a usage chunk (finalUsage == nil); this is an accepted approximation.
 			collector.Record(metrics.MetricEvent{
 				Timestamp:         time.Now(),
 				Provider:          entry.Provider,
@@ -420,6 +424,7 @@ func handleStreamWithFallback(
 				ProviderLatencyMs: providerMs,
 				CacheLatencyMs:    cacheLatencyMs,
 				FallbackAttempts:  i,
+				CostUSD:           metrics.EstimateCost(entry.Provider, attempt.Model, usage.PromptTokens, usage.CompletionTokens),
 			})
 			return
 		}
