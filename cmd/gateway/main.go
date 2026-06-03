@@ -12,6 +12,7 @@ import (
 	"github.com/pavanv25/ai-gateway/internal/alias"
 	"github.com/pavanv25/ai-gateway/internal/api"
 	"github.com/pavanv25/ai-gateway/internal/cache"
+	"github.com/pavanv25/ai-gateway/internal/metrics"
 	"github.com/pavanv25/ai-gateway/internal/provider"
 	"github.com/pavanv25/ai-gateway/internal/ratelimit"
 )
@@ -119,7 +120,7 @@ func main() {
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
-	api.RegisterRoutes(r, limiter, providers, resolver, semanticCache, nil)
+	api.RegisterRoutes(r, limiter, providers, resolver, semanticCache, metrics.NewStore())
 
 	log.Printf("starting gateway on :8080 tpm_limit=%d redis=%s", tpmLimit, redisURL)
 	if err := r.Run(":8080"); err != nil {
