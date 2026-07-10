@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"time"
 
+	cors "github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 	"github.com/pavanv25/ai-gateway/internal/alias"
@@ -116,7 +117,19 @@ func main() {
 		log.Printf("semantic cache disabled (OPENAI_API_KEY not set — needed for embeddings)")
 	}
 
+	corsOrigin := os.Getenv("CORS_ORIGIN")
+	if corsOrigin == "" {
+		corsOrigin = "http://localhost:5173"
+	}
+	log.Printf("CORS allowed origin: %s", corsOrigin)
+
 	r := gin.Default()
+	r.Use(cors.New(cors.Config{
+		AllowOrigins: []string{corsOrigin},
+		AllowMethods: []string{"GET", "POST", "OPTIONS"},
+		AllowHeaders: []string{"Content-Type", "X-API-Key"},
+		MaxAge:       12 * time.Hour,
+	}))
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})

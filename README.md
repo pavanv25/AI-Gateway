@@ -176,6 +176,7 @@ ALIAS_CONFIG=config/aliases.yaml go run ./cmd/gateway
 | `CACHE_TTL` | `3600` | Semantic cache TTL in seconds |
 | `CB_FAILURE_THRESHOLD` | — | Consecutive failures before tripping a circuit breaker (`0` = disabled) |
 | `CB_COOLDOWN_SECONDS` | `60` | Seconds a tripped circuit stays open before allowing a probe request |
+| `CORS_ORIGIN` | `http://localhost:5173` | Allowed CORS origin for browser clients (e.g. the dashboard) |
 
 ---
 
