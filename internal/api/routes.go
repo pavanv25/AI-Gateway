@@ -22,16 +22,51 @@ import (
 // limiter, providers, resolver, and c are injected — no global state.
 // resolver may be nil when the alias feature is disabled.
 // c may be nil when the semantic cache is disabled.
-// collector may be nil, in which case a NoopCollector is used.
-func RegisterRoutes(r *gin.Engine, limiter *ratelimit.Limiter, providers map[string]provider.Provider, resolver *alias.Resolver, c cache.Cache, collector metrics.Collector) {
-	if collector == nil {
+// store may be nil, in which case metrics are discarded and /metrics routes are not registered.
+func RegisterRoutes(r *gin.Engine, limiter *ratelimit.Limiter, providers map[string]provider.Provider, resolver *alias.Resolver, c cache.Cache, store *metrics.Store) {
+	var collector metrics.Collector
+	if store != nil {
+		collector = store
+	} else {
 		collector = metrics.NoopCollector{}
 	}
 	v1 := r.Group("/v1")
 	v1.Use(ratelimit.AuthMiddleware())
 	{
 		v1.POST("/chat", chatHandler(limiter, providers, resolver, c, collector))
+		if store != nil {
+			v1.GET("/metrics", metricsHandler(store))
+		}
 	}
+}
+
+// metricsHandler returns aggregated metrics for the requested time window.
+// ?window accepts any Go duration string (e.g. 5m, 1h); default 5m, max 1h.
+func metricsHandler(store *metrics.Store) gin.HandlerFunc {
+	return func(gc *gin.Context) {
+		window, err := parseWindow(gc.Query("window"))
+		if err != nil {
+			gc.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		gc.JSON(http.StatusOK, store.Query(window))
+	}
+}
+
+// parseWindow parses a Go duration string into a window capped at 1 hour.
+// Returns 5 minutes when raw is empty.
+func parseWindow(raw string) (time.Duration, error) {
+	if raw == "" {
+		return 5 * time.Minute, nil
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return 0, errors.New("invalid window: use a Go duration string (e.g. 5m, 1h)")
+	}
+	if d > time.Hour {
+		d = time.Hour
+	}
+	return d, nil
 }
 
 func chatHandler(limiter *ratelimit.Limiter, providers map[string]provider.Provider, resolver *alias.Resolver, c cache.Cache, collector metrics.Collector) gin.HandlerFunc {

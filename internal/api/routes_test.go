@@ -10,11 +10,13 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 	"github.com/pavanv25/ai-gateway/internal/alias"
+	"github.com/pavanv25/ai-gateway/internal/metrics"
 	"github.com/pavanv25/ai-gateway/internal/provider"
 	"github.com/pavanv25/ai-gateway/internal/ratelimit"
 	"github.com/pavanv25/ai-gateway/pkg/models"
@@ -86,6 +88,10 @@ func newTestLimiter(t *testing.T, tpmLimit int) *ratelimit.Limiter {
 }
 
 func newTestRouter(limiter *ratelimit.Limiter, providers map[string]provider.Provider, c *MockCache) *gin.Engine {
+	return newTestRouterWithStore(limiter, providers, c, nil)
+}
+
+func newTestRouterWithStore(limiter *ratelimit.Limiter, providers map[string]provider.Provider, c *MockCache, store *metrics.Store) *gin.Engine {
 	r := gin.New()
 	var cache interface {
 		Lookup(context.Context, string, string) (*models.ChatResponse, []float64, error)
@@ -95,7 +101,7 @@ func newTestRouter(limiter *ratelimit.Limiter, providers map[string]provider.Pro
 	if c != nil {
 		cache = c
 	}
-	RegisterRoutes(r, limiter, providers, nil, cache, nil)
+	RegisterRoutes(r, limiter, providers, nil, cache, store)
 	return r
 }
 
@@ -355,6 +361,121 @@ func TestStreamHandler_CacheMiss_StoresAccumulatedText(t *testing.T) {
 	}
 }
 
+// --- GET /v1/metrics tests ---
+
+func doMetricsRequest(r *gin.Engine, query string) *httptest.ResponseRecorder {
+	path := "/v1/metrics"
+	if query != "" {
+		path += "?" + query
+	}
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
+
+func TestMetricsHandler_ReturnsSnapshotJSON(t *testing.T) {
+	store := metrics.NewStore()
+	store.Record(metrics.MetricEvent{
+		Timestamp:    time.Now(),
+		Provider:     "openai",
+		Model:        "gpt-4o",
+		TotalTokens:  100,
+		CostUSD:      0.001,
+		CacheHit:     false,
+	})
+
+	limiter := newTestLimiter(t, 10000)
+	r := newTestRouterWithStore(limiter, map[string]provider.Provider{}, nil, store)
+
+	w := doMetricsRequest(r, "window=1h")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var snap metrics.Snapshot
+	if err := json.NewDecoder(w.Body).Decode(&snap); err != nil {
+		t.Fatalf("failed to decode snapshot: %v", err)
+	}
+	if snap.Totals.RequestCount != 1 {
+		t.Errorf("RequestCount: want 1, got %d", snap.Totals.RequestCount)
+	}
+	if snap.Totals.TotalTokens != 100 {
+		t.Errorf("TotalTokens: want 100, got %d", snap.Totals.TotalTokens)
+	}
+	if len(snap.Breakdowns) != 1 {
+		t.Errorf("expected 1 breakdown, got %d", len(snap.Breakdowns))
+	}
+}
+
+func TestMetricsHandler_DefaultWindowIs5m(t *testing.T) {
+	store := metrics.NewStore()
+	limiter := newTestLimiter(t, 10000)
+	r := newTestRouterWithStore(limiter, map[string]provider.Provider{}, nil, store)
+
+	w := doMetricsRequest(r, "") // no window param
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var snap metrics.Snapshot
+	_ = json.NewDecoder(w.Body).Decode(&snap)
+	if snap.Window != 5*time.Minute {
+		t.Errorf("default window: want 5m, got %v", snap.Window)
+	}
+}
+
+func TestMetricsHandler_InvalidWindowReturns400(t *testing.T) {
+	store := metrics.NewStore()
+	limiter := newTestLimiter(t, 10000)
+	r := newTestRouterWithStore(limiter, map[string]provider.Provider{}, nil, store)
+
+	w := doMetricsRequest(r, "window=notaduration")
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestMetricsHandler_WindowCappedAt1h(t *testing.T) {
+	store := metrics.NewStore()
+	limiter := newTestLimiter(t, 10000)
+	r := newTestRouterWithStore(limiter, map[string]provider.Provider{}, nil, store)
+
+	w := doMetricsRequest(r, "window=24h")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	var snap metrics.Snapshot
+	_ = json.NewDecoder(w.Body).Decode(&snap)
+	if snap.Window != time.Hour {
+		t.Errorf("window should be capped at 1h, got %v", snap.Window)
+	}
+}
+
+func TestMetricsHandler_NoStoreReturns404(t *testing.T) {
+	// When store is nil, /v1/metrics route is not registered.
+	limiter := newTestLimiter(t, 10000)
+	r := newTestRouter(limiter, map[string]provider.Provider{}, nil)
+
+	w := doMetricsRequest(r, "")
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 when store is nil, got %d", w.Code)
+	}
+}
+
+func TestMetricsHandler_RequiresAuth(t *testing.T) {
+	store := metrics.NewStore()
+	limiter := newTestLimiter(t, 10000)
+	r := newTestRouterWithStore(limiter, map[string]provider.Provider{}, nil, store)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/metrics", nil) // no X-API-Key
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without auth, got %d", w.Code)
+	}
+}
+
 // circuitOpenProvider simulates a provider whose circuit is open.
 type circuitOpenProvider struct{}
 
@@ -391,7 +512,7 @@ func TestChatHandler_CircuitOpenSkippedFallbackContinues(t *testing.T) {
 	}
 
 	r := gin.New()
-	RegisterRoutes(r, limiter, providers, resolver, nil, nil)
+	RegisterRoutes(r, limiter, providers, resolver, nil, nil /*store*/)
 
 	body := `{"task":"test-task","messages":[{"role":"user","content":"hello"}]}`
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat", strings.NewReader(body))
