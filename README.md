@@ -1,99 +1,111 @@
 # AI Gateway
 
-One endpoint to rule them all. Point it at OpenAI, Anthropic, or both — it'll
-figure out who's alive, who's rate-limiting you, and who to blame when things
-go wrong.
+> A unified LLM gateway with intelligent routing, automatic failover, semantic
+> caching, and real-time observability — built in Go.
 
-Built in Go. Backed by Redis. Comes with a live dashboard.
+![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?style=flat&logo=go&logoColor=white)
+![Redis](https://img.shields.io/badge/Redis-required-DC382D?style=flat&logo=redis&logoColor=white)
+![License](https://img.shields.io/badge/License-MIT-green?style=flat)
+
+Route a single API request across OpenAI and Anthropic with per-key rate
+limiting, vector-similarity caching, circuit breakers, and a live metrics
+dashboard — without changing your application code.
 
 ---
 
-## What it does
-
-You send one chat request. The gateway:
-
-1. **Checks the semantic cache** — if someone asked basically the same thing
-   recently, it returns the cached answer in microseconds and saves you money.
-2. **Enforces rate limits** — sliding 60-second token window per API key,
-   backed by Redis. No surprises on your bill.
-3. **Routes to the right provider** — directly (`provider: openai`) or via a
-   named task (`task: fast-chat`) that maps to an ordered fallback list.
-4. **Retries on failure** — if a provider returns 5xx or 429, the gateway
-   quietly tries the next one. You never see the error.
-5. **Tracks everything** — tokens, cost, latency, cache hits, errors. Stream
-   it live to the dashboard or poll for aggregated snapshots.
+## How a request flows
 
 ```text
-POST /v1/chat  →  Auth  →  Semantic Cache
-                                │
-                           hit ─┘  miss ──→  resolveEntries  →  Fallback Loop
-                                                                  │ Reserve (rate limit)
-                                                                  │ Provider.Chat / ChatStream
-                                                                  │ Commit actual tokens
-                                                                  │ retry next entry on 5xx/429
-                                                                  └ AsyncStore to cache
+                        ┌─────────────────────────────────────────────────────┐
+POST /v1/chat           │                    AI Gateway                       │
+─────────────────────▶  │                                                     │
+  X-API-Key: •••        │  1. Auth          verify X-API-Key header           │
+  provider / task       │  2. Cache lookup  cosine similarity ≥ 0.95?         │
+  model                 │     └─ HIT  ────▶ return cached response            │
+  messages              │     └─ MISS ────▶ resolve provider list             │
+                        │  3. Rate limit    sliding 60-s TPM window (Redis)   │
+                        │  4. Call provider Chat() or ChatStream()             │
+                        │     └─ 5xx/429 ─▶ try next provider in list        │
+                        │  5. Commit tokens correct reservation → actual cost  │
+                        │  6. Cache store   async write-back to Qdrant        │
+                        │  7. Emit metric   tokens · cost · latency · errors  │
+                        └─────────────────────────────────────────────────────┘
 ```
 
 ---
 
 ## Features
 
-| | |
+### Routing & Reliability
+
+| Feature | Details |
 | --- | --- |
-| `POST /v1/chat` | Unified chat — JSON or SSE streaming |
-| `GET /v1/metrics` | Aggregated snapshot: tokens, cost, latency p50/p95, cache rates |
-| `GET /v1/metrics/stream` | Live SSE feed — one event per request, in real time |
-| `GET /health` | Liveness probe (no auth) |
-| **Rate limiting** | Sliding-window TPM per API key via Redis sorted set + Lua |
-| **Semantic cache** | OpenAI embeddings → Qdrant vector search (cosine ≥ 0.95); per-key isolation; TTL |
-| **Task aliasing** | `task: fast-chat` resolves to an ordered `[provider, model]` fallback list |
-| **Circuit breaker** | Per-provider Closed/Open/HalfOpen state machine; trips on 5xx, 429, network errors |
-| **Cost tracking** | Per-request `CostUSD` from a pricing table; reservoir-sampled p50/p95 latency |
-| **Live dashboard** | React + Recharts; rate chart, latency bars, provider breakdown, event log |
+| **Unified endpoint** | `POST /v1/chat` — JSON response or SSE stream, same interface for all providers |
+| **Task-based aliasing** | Name a logical task (`fast-chat`, `coding`) and map it to an ordered `[provider, model]` fallback list in YAML |
+| **Automatic failover** | Retriable errors (5xx, 429, open circuit) silently advance to the next provider; 4xx errors fail immediately |
+| **Circuit breaker** | Per-provider Closed → Open → HalfOpen state machine; configurable failure threshold and cooldown |
+| **Streaming failover** | SSE failover is possible until the first content byte is flushed; after that, the client is committed |
+
+### Cost & Performance
+
+| Feature | Details |
+| --- | --- |
+| **Semantic cache** | Embeds prompts with `text-embedding-3-small`, stores vectors in Qdrant; cosine similarity ≥ 0.95 returns a cached response |
+| **Rate limiting** | Sliding-window token-per-minute limiter per API key; `Reserve` pre-allocates, `Commit` corrects to actual usage |
+| **Cost tracking** | Per-request `CostUSD` from a hardcoded pricing table covering GPT-4o, GPT-4o mini, Claude Sonnet, Opus, and Haiku |
+
+### Observability
+
+| Endpoint | Description |
+| --- | --- |
+| `GET /v1/metrics?window=5m` | Aggregated snapshot — request count, tokens, cost, cache rates, latency p50/p95, per-provider breakdown |
+| `GET /v1/metrics/stream` | Live SSE feed — one `MetricEvent` per request, pushed to all connected subscribers |
+| `GET /health` | Unauthenticated liveness probe |
+
+All metrics endpoints require `X-API-Key`. Latency is reservoir-sampled
+(1 000 samples/bucket) with 1-minute buckets and 1-hour retention.
 
 ---
 
 ## Quickstart
 
-You'll need Redis. Everything else is optional.
+**Prerequisites:** Go 1.22+, Redis. Everything else is opt-in.
 
 ```bash
-# Minimal — uses the mock provider, no API keys needed
+# Zero-config start — mock provider only, no API keys needed
 REDIS_URL=redis://localhost:6379 go run ./cmd/gateway
 
-# Full stack — real providers, semantic cache, aliases
-OPENAI_API_KEY=sk-...
-ANTHROPIC_API_KEY=sk-ant-...
-QDRANT_URL=http://localhost:6333
-ALIAS_CONFIG=config/aliases.yaml
+# Full setup
+OPENAI_API_KEY=sk-...        \
+ANTHROPIC_API_KEY=sk-ant-... \
+QDRANT_URL=http://localhost:6333  \
+ALIAS_CONFIG=config/aliases.yaml  \
 go run ./cmd/gateway
 ```
 
 ```bash
-# Tests — no Redis required (miniredis)
+# Run all tests (no external Redis — uses miniredis)
 go test ./...
+go test ./... -race   # with data-race detector
 ```
 
-### + Dashboard
+### Dashboard
 
 ```bash
-# Terminal 1
+# Terminal 1 — gateway
 go run ./cmd/gateway
 
-# Terminal 2
+# Terminal 2 — dashboard dev server (proxies /v1/* to :8080)
 cd dashboard && npm install && npm run dev
 ```
 
-Open `http://localhost:5173`. Enter any non-empty string as the API key.
-Vite proxies `/v1/*` to the gateway — no CORS setup needed locally.
+Open `http://localhost:5173` and enter any non-empty string as the API key.
 
 ---
 
 ## Usage
 
-### Direct request
-
-Pick a provider and model explicitly:
+### Direct provider request
 
 ```bash
 curl -X POST http://localhost:8080/v1/chat \
@@ -101,48 +113,40 @@ curl -X POST http://localhost:8080/v1/chat \
   -H "Content-Type: application/json" \
   -d '{
     "provider": "openai",
-    "model": "gpt-4o-mini",
+    "model":    "gpt-4o-mini",
     "messages": [{"role": "user", "content": "Hello"}],
     "max_tokens": 100
   }'
 ```
 
-### Task-based request
-
-Let the gateway decide:
+### Task-based request with automatic failover
 
 ```bash
 curl -X POST http://localhost:8080/v1/chat \
   -H "X-API-Key: my-key" \
   -H "Content-Type: application/json" \
   -d '{
-    "task": "fast-chat",
+    "task":     "fast-chat",
     "messages": [{"role": "user", "content": "Hello"}],
     "max_tokens": 100
   }'
 ```
 
-`task` resolves to an ordered `[provider, model]` list from your alias config.
-The gateway tries each entry in order. Retriable errors (5xx, 429, open circuit)
-move to the next entry silently. The response always includes `resolved_provider`
-so you know who answered.
+The response always includes `resolved_provider` indicating which backend
+answered. Add `"stream": true` to either form for a Server-Sent Events response.
 
-Add `"stream": true` to either form for SSE. Streaming failover is only possible
-before the first content chunk is flushed — after that, you're committed.
-
-A cache hit returns `"resolved_provider": "cache"` and `"cache_hit": true`.
-Tokens are still counted against the rate limit.
+A cache hit returns `"resolved_provider": "cache"` and `"cache_hit": true`; the
+token cost is still counted against the rate limit.
 
 ### Alias config
 
-Copy `config/aliases.example.yaml` and point `ALIAS_CONFIG` at it:
-
 ```yaml
+# config/aliases.yaml
 tasks:
   fast-chat:
     - provider: openai
       model: gpt-4o-mini
-    - provider: anthropic          # fallback if OpenAI is having a moment
+    - provider: anthropic          # automatic fallback on failure
       model: claude-haiku-4-5-20251001
 
   coding:
@@ -152,38 +156,42 @@ tasks:
       model: gpt-4o
 ```
 
+```bash
+ALIAS_CONFIG=config/aliases.yaml go run ./cmd/gateway
+```
+
 ---
 
-## Environment variables
+## Configuration
 
-| Variable | Default | |
+| Variable | Default | Description |
 | --- | --- | --- |
-| `REDIS_URL` | `redis://localhost:6379` | Required |
-| `TPM_LIMIT` | `60000` | Tokens per minute per API key |
-| `OPENAI_API_KEY` | — | Enables OpenAI provider + semantic cache embeddings |
+| `REDIS_URL` | `redis://localhost:6379` | Redis connection string |
+| `TPM_LIMIT` | `60000` | Token-per-minute cap per API key |
+| `OPENAI_API_KEY` | — | Enables OpenAI provider; also required for semantic cache |
 | `ANTHROPIC_API_KEY` | — | Enables Anthropic provider |
 | `ALIAS_CONFIG` | — | Path to alias YAML; task routing disabled if unset |
 | `QDRANT_URL` | — | Qdrant REST endpoint; semantic cache disabled if unset |
-| `QDRANT_API_KEY` | — | Qdrant Cloud auth token |
+| `QDRANT_API_KEY` | — | Qdrant Cloud auth token (optional) |
 | `CACHE_TTL` | `3600` | Semantic cache TTL in seconds |
-| `CB_FAILURE_THRESHOLD` | — | Consecutive failures before tripping a circuit breaker; `0` = disabled |
-| `CB_COOLDOWN_SECONDS` | `60` | How long a tripped circuit stays open before a probe is allowed |
+| `CB_FAILURE_THRESHOLD` | — | Consecutive failures before tripping a circuit breaker (`0` = disabled) |
+| `CB_COOLDOWN_SECONDS` | `60` | Seconds a tripped circuit stays open before allowing a probe request |
 
 ---
 
 ## Project layout
 
 ```text
-cmd/gateway/          entry point — wires everything together
+cmd/gateway/              ← entry point; wires all components into the Gin router
 config/
-  aliases.example.yaml
-dashboard/            React + Recharts (Vite) — see dashboard/README.md
+  aliases.example.yaml    ← copy this and set ALIAS_CONFIG
+dashboard/                ← React + Recharts metrics dashboard (Vite)
 internal/
-  alias/              task → [provider, model] resolver
-  api/                routes: /chat, /metrics, /metrics/stream
-  cache/              semantic cache (embeddings + Qdrant)
-  metrics/            MetricEvent, in-memory Store, pricing table
-  provider/           Provider interface, OpenAI, Anthropic, Mock, CircuitBreaker
-  ratelimit/          sliding-window TPM limiter + AuthMiddleware
-pkg/models/           shared request/response types
+  alias/                  ← task-name → [provider, model] resolver
+  api/                    ← /chat handler, /metrics snapshot, /metrics/stream SSE
+  cache/                  ← semantic cache (OpenAI embeddings + Qdrant)
+  metrics/                ← MetricEvent, in-memory Store, pricing table
+  provider/               ← Provider interface, OpenAI, Anthropic, Mock, CircuitBreaker
+  ratelimit/              ← sliding-window TPM limiter + AuthMiddleware
+pkg/models/               ← shared ChatRequest / ChatResponse / StreamEvent types
 ```
