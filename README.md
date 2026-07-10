@@ -30,8 +30,11 @@ type Provider interface {
 | Component | Description |
 | --- | --- |
 | `POST /v1/chat` | Unified chat endpoint — JSON response or SSE stream |
+| `GET /v1/metrics` | Aggregated metrics snapshot over a configurable window (default 5 min, max 1 h) |
+| `GET /v1/metrics/stream` | SSE fan-out of live `MetricEvent` objects — one event per request |
 | `GET /health` | Unauthenticated liveness probe |
 | **Rate limiter** | Sliding 60-second window per `X-API-Key`; `Reserve` holds `max_tokens`, `Commit` corrects to actual usage |
+| **Metrics & cost tracking** | Per-request token counts, latency (p50/p95), cache-hit flag, and `CostUSD` via a hardcoded pricing table; 1-minute buckets, 1 h retention, reservoir-sampled latency |
 | **Semantic cache** | Embeds prompts via OpenAI, stores/retrieves responses in Qdrant by cosine similarity (threshold 0.95); per-tenant isolation via hashed API key; configurable TTL |
 | **Task-based aliasing** | `task` field resolves to an ordered provider/model fallback list from a YAML config |
 | **Fallback loop** | On retriable error (5xx/429), advances to the next alias entry; 4xx fails immediately. Circuit-open providers are skipped without a real call. |
@@ -43,16 +46,21 @@ type Provider interface {
 ## Project Layout
 
 ```text
-cmd/gateway/              entry point — wires Redis, Limiter, providers, alias resolver, cache, Gin router
+cmd/gateway/              entry point — wires Redis, Limiter, providers, alias resolver, cache, metrics store, Gin router
 config/
   aliases.example.yaml    example alias config; copy and set ALIAS_CONFIG to use
+dashboard/                React + Recharts dashboard (Vite); see dashboard/README.md
 internal/
   alias/
     alias.go              Resolver — loads YAML, maps task names to ordered Entry lists
-  api/routes.go           RegisterRoutes; chat handler with cache lookup, fallback loop, async cache store
+  api/routes.go           RegisterRoutes; chat handler, /metrics snapshot, /metrics/stream SSE
   cache/
     cache.go              Cache interface
     semantic.go           SemanticCache — OpenAI embeddings + Qdrant REST
+  metrics/
+    metrics.go            MetricEvent struct + Collector interface
+    store.go              Thread-safe in-memory Store (1-min buckets, 1h retention, SSE broadcaster)
+    pricing.go            EstimateCost — hardcoded pricing table for 5 OpenAI/Anthropic models
   provider/
     provider.go           Provider interface + ProviderError + IsRetriable + ErrCircuitOpen
     circuit.go            CircuitBreaker — 3-state Provider wrapper
@@ -68,12 +76,28 @@ pkg/models/models.go      Shared types: ChatRequest (+ Task), ChatResponse (+ Re
 ## Running
 
 ```bash
-# Run (requires Redis)
+# Run gateway (requires Redis)
 REDIS_URL=redis://localhost:6379 go run ./cmd/gateway
 
 # Test (uses miniredis — no Redis needed)
 go test ./...
 ```
+
+### Dashboard (local dev)
+
+```bash
+# Terminal 1 — gateway
+go run ./cmd/gateway
+
+# Terminal 2 — dashboard (proxies /v1/* to localhost:8080 via Vite)
+cd dashboard
+npm install
+npm run dev
+```
+
+Open `http://localhost:5173`, enter any non-empty string as the API key, and the
+dashboard will show live metrics. Requests and errors appear in real time via the
+SSE stream; the snapshot charts refresh every 15 seconds.
 
 **Environment variables:**
 

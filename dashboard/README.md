@@ -1,32 +1,41 @@
-# React + TypeScript + Vite
+# AI Gateway Dashboard
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+React + Recharts real-time metrics dashboard for the AI Gateway.
 
-Currently, two official plugins are available:
+## Dev setup
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+```bash
+# From the repo root — gateway must be running first
+go run ./cmd/gateway
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+# Then, in a second terminal
+cd dashboard
+npm install
+npm run dev        # http://localhost:5173
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+Vite proxies all `/v1/*` requests to `http://localhost:8080`, so no CORS
+configuration is needed for local development.
+
+Enter any non-empty string as the API key in the header bar (the gateway only
+checks that the header is present, not that it matches a stored value).
+
+## What's on the dashboard
+
+| Panel | Data source |
+| --- | --- |
+| Stat cards (requests, errors, cache hit rate, tokens, cost) | `GET /v1/metrics` — polled every 15 s |
+| Request & error rate chart (line, last 30 min) | `GET /v1/metrics/stream` — SSE, client-side bucketing by minute |
+| Latency p50/p95 chart (bar) | `GET /v1/metrics` |
+| Provider/model breakdown chart (horizontal bar) | `GET /v1/metrics` |
+| Live event log (scrolling table, last 100 events) | `GET /v1/metrics/stream` — SSE |
+
+The SSE connection reconnects automatically with a 2-second delay if the gateway
+restarts. A 4xx response (wrong or missing API key) stops retrying and shows
+"Offline" in the header.
+
+## Build
+
+```bash
+npm run build      # output in dashboard/dist/
+```
