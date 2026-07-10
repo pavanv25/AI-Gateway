@@ -11,6 +11,7 @@ import (
 const (
 	bucketRetention = time.Hour
 	reservoirCap    = 1000
+	subscriberBuf   = 64 // per-subscriber channel capacity; events dropped if full (slow client)
 )
 
 type pmKey struct {
@@ -43,14 +44,16 @@ type bucketSet struct {
 
 // Store is a thread-safe in-memory metrics aggregator.
 // It accumulates MetricEvents into 1-minute buckets and retains up to 1 hour of history.
+// It also fans out each recorded event to any active SSE subscribers.
 //
 // A single sync.Mutex guards all state. Avoid replacing with sync.RWMutex without
 // care: Query copies latency slices out before sorting, so the lock must be held
 // across both the copy and the release — a subtle invariant to preserve.
 type Store struct {
-	mu      sync.Mutex
-	buckets map[int64]*bucketSet // key: UTC minute-truncated Unix timestamp
-	now     func() time.Time
+	mu          sync.Mutex
+	buckets     map[int64]*bucketSet // key: UTC minute-truncated Unix timestamp
+	now         func() time.Time
+	subscribers []chan MetricEvent
 }
 
 // NewStore returns a Store backed by the real wall clock.
@@ -83,6 +86,40 @@ func (s *Store) Record(e MetricEvent) {
 		bs.byPM[pm] = b
 	}
 	addToBucket(b, e)
+
+	// Fan out to SSE subscribers. Send is non-blocking: if a subscriber's
+	// buffer is full (slow client), the event is dropped for that subscriber.
+	for _, sub := range s.subscribers {
+		select {
+		case sub <- e:
+		default:
+		}
+	}
+}
+
+// Subscribe returns a channel that receives a copy of every MetricEvent recorded
+// after this call. The caller must eventually call Unsubscribe to free resources.
+// Events are dropped for this subscriber if its buffer (subscriberBuf) fills up.
+func (s *Store) Subscribe() chan MetricEvent {
+	ch := make(chan MetricEvent, subscriberBuf)
+	s.mu.Lock()
+	s.subscribers = append(s.subscribers, ch)
+	s.mu.Unlock()
+	return ch
+}
+
+// Unsubscribe removes ch from the fan-out list and closes it, signalling the
+// reader that no further events will arrive. Safe to call multiple times.
+func (s *Store) Unsubscribe(ch chan MetricEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, sub := range s.subscribers {
+		if sub == ch {
+			s.subscribers = append(s.subscribers[:i], s.subscribers[i+1:]...)
+			close(ch)
+			return
+		}
+	}
 }
 
 func addToBucket(b *bucket, e MetricEvent) {

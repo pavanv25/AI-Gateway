@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -474,6 +475,70 @@ func TestMetricsHandler_RequiresAuth(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401 without auth, got %d", w.Code)
 	}
+}
+
+// --- GET /v1/metrics/stream tests ---
+
+func TestMetricsStreamHandler_RequiresAuth(t *testing.T) {
+	store := metrics.NewStore()
+	limiter := newTestLimiter(t, 10000)
+	r := newTestRouterWithStore(limiter, map[string]provider.Provider{}, nil, store)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/metrics/stream", nil) // no X-API-Key
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestMetricsStreamHandler_ReceivesEvent(t *testing.T) {
+	store := metrics.NewStore()
+	limiter := newTestLimiter(t, 10000)
+	r := newTestRouterWithStore(limiter, map[string]provider.Provider{}, nil, store)
+
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Record an event after the handler has had time to register its subscription.
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		store.Record(metrics.MetricEvent{
+			Timestamp:   time.Now(),
+			Provider:    "openai",
+			TotalTokens: 42,
+		})
+	}()
+
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/v1/metrics/stream", nil)
+	req.Header.Set("X-API-Key", "test-key")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("SSE request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	ct := resp.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "text/event-stream") {
+		t.Errorf("expected text/event-stream content-type, got %q", ct)
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "data:") && strings.Contains(line, "openai") {
+			cancel() // stop the stream
+			return
+		}
+	}
+	t.Error("timed out without receiving expected SSE event")
 }
 
 // circuitOpenProvider simulates a provider whose circuit is open.

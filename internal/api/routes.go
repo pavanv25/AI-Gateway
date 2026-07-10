@@ -36,6 +36,7 @@ func RegisterRoutes(r *gin.Engine, limiter *ratelimit.Limiter, providers map[str
 		v1.POST("/chat", chatHandler(limiter, providers, resolver, c, collector))
 		if store != nil {
 			v1.GET("/metrics", metricsHandler(store))
+			v1.GET("/metrics/stream", metricsStreamHandler(store))
 		}
 	}
 }
@@ -67,6 +68,35 @@ func parseWindow(raw string) (time.Duration, error) {
 		d = time.Hour
 	}
 	return d, nil
+}
+
+// metricsStreamHandler streams MetricEvents as SSE to connected clients.
+// Each event recorded by the gateway is pushed as a JSON SSE message named "metric".
+// Events are dropped for slow clients that cannot keep up with the buffer.
+// The stream closes when the client disconnects.
+func metricsStreamHandler(store *metrics.Store) gin.HandlerFunc {
+	return func(gc *gin.Context) {
+		ch := store.Subscribe()
+		defer store.Unsubscribe(ch)
+
+		gc.Header("Content-Type", "text/event-stream")
+		gc.Header("Cache-Control", "no-cache")
+		gc.Header("Connection", "keep-alive")
+
+		ctx := gc.Request.Context()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case event, ok := <-ch:
+				if !ok {
+					return
+				}
+				gc.SSEvent("metric", event)
+				gc.Writer.Flush()
+			}
+		}
+	}
 }
 
 func chatHandler(limiter *ratelimit.Limiter, providers map[string]provider.Provider, resolver *alias.Resolver, c cache.Cache, collector metrics.Collector) gin.HandlerFunc {

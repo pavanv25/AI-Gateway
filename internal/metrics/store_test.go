@@ -214,6 +214,78 @@ func TestStore_PercentileCorrectness(t *testing.T) {
 	}
 }
 
+// --- Broadcaster tests ---
+
+func TestStore_SubscribeReceivesEvent(t *testing.T) {
+	s := NewStore()
+	ch := s.Subscribe()
+	defer s.Unsubscribe(ch)
+
+	now := time.Now()
+	s.Record(MetricEvent{Timestamp: now, Provider: "openai", TotalTokens: 50})
+
+	select {
+	case event := <-ch:
+		if event.Provider != "openai" || event.TotalTokens != 50 {
+			t.Fatalf("unexpected event: %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for subscribed event")
+	}
+}
+
+func TestStore_UnsubscribeClosesChannel(t *testing.T) {
+	s := NewStore()
+	ch := s.Subscribe()
+	s.Unsubscribe(ch)
+
+	_, ok := <-ch
+	if ok {
+		t.Fatal("expected channel to be closed after Unsubscribe")
+	}
+}
+
+func TestStore_UnsubscribeIdempotent(t *testing.T) {
+	s := NewStore()
+	ch := s.Subscribe()
+	s.Unsubscribe(ch)
+	s.Unsubscribe(ch) // second call must not panic
+}
+
+func TestStore_SlowSubscriberDropsEvents(t *testing.T) {
+	s := NewStore()
+	ch := s.Subscribe()
+	defer s.Unsubscribe(ch)
+
+	now := time.Now()
+	// Send more events than the buffer holds — must not block or panic.
+	for i := 0; i < subscriberBuf+10; i++ {
+		s.Record(MetricEvent{Timestamp: now, Provider: "mock"})
+	}
+}
+
+func TestStore_MultipleSubscribers(t *testing.T) {
+	s := NewStore()
+	ch1 := s.Subscribe()
+	ch2 := s.Subscribe()
+	defer s.Unsubscribe(ch1)
+	defer s.Unsubscribe(ch2)
+
+	now := time.Now()
+	s.Record(MetricEvent{Timestamp: now, Provider: "anthropic"})
+
+	for _, ch := range []chan MetricEvent{ch1, ch2} {
+		select {
+		case event := <-ch:
+			if event.Provider != "anthropic" {
+				t.Fatalf("unexpected provider: %s", event.Provider)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for event on subscriber")
+		}
+	}
+}
+
 // TestStore_ConcurrentRecord verifies there are no data races under concurrent writes.
 // Run with: go test -race ./internal/metrics/...
 func TestStore_ConcurrentRecord(t *testing.T) {
