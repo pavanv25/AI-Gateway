@@ -4,7 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -15,6 +15,7 @@ import (
 	"github.com/pavanv25/ai-gateway/internal/metrics"
 	"github.com/pavanv25/ai-gateway/internal/provider"
 	"github.com/pavanv25/ai-gateway/internal/ratelimit"
+	"github.com/pavanv25/ai-gateway/internal/reqlog"
 	"github.com/pavanv25/ai-gateway/pkg/models"
 )
 
@@ -102,6 +103,7 @@ func metricsStreamHandler(store *metrics.Store) gin.HandlerFunc {
 func chatHandler(limiter *ratelimit.Limiter, providers map[string]provider.Provider, resolver *alias.Resolver, c cache.Cache, collector metrics.Collector) gin.HandlerFunc {
 	return func(gc *gin.Context) {
 		requestStart := time.Now()
+		reqID := gc.GetString(reqlog.RequestIDContextKey)
 
 		var req models.ChatRequest
 		if err := gc.ShouldBindJSON(&req); err != nil {
@@ -112,7 +114,7 @@ func chatHandler(limiter *ratelimit.Limiter, providers map[string]provider.Provi
 		apiKey := gc.GetString(ratelimit.APIKeyContextKey)
 		ctx := gc.Request.Context()
 
-		entries, status, errMsg := resolveEntries(&req, resolver)
+		entries, status, errMsg := resolveEntries(&req, resolver, reqID)
 		if errMsg != "" {
 			gc.JSON(status, gin.H{"error": errMsg})
 			return
@@ -137,7 +139,7 @@ func chatHandler(limiter *ratelimit.Limiter, providers map[string]provider.Provi
 						gc.JSON(http.StatusTooManyRequests, gin.H{"error": "token rate limit exceeded"})
 						return
 					}
-					log.Printf("reserve error: %v", err)
+					slog.Error("rate limiter reserve failed", "request_id", reqID, "err", err)
 					gc.JSON(http.StatusInternalServerError, gin.H{"error": "rate limiter unavailable"})
 					return
 				}
@@ -165,9 +167,9 @@ func chatHandler(limiter *ratelimit.Limiter, providers map[string]provider.Provi
 		}
 
 		if req.Stream {
-			handleStreamWithFallback(gc, entries, providers, &req, limiter, apiKey, c, cacheKey, apiKeyHash, cacheVector, requestStart, cacheLatencyMs, collector)
+			handleStreamWithFallback(gc, entries, providers, &req, limiter, apiKey, c, cacheKey, apiKeyHash, cacheVector, requestStart, cacheLatencyMs, collector, reqID)
 		} else {
-			handleChatWithFallback(gc, entries, providers, &req, limiter, apiKey, c, cacheKey, apiKeyHash, cacheVector, requestStart, cacheLatencyMs, collector)
+			handleChatWithFallback(gc, entries, providers, &req, limiter, apiKey, c, cacheKey, apiKeyHash, cacheVector, requestStart, cacheLatencyMs, collector, reqID)
 		}
 	}
 }
@@ -201,13 +203,13 @@ func sha256hex(s string) string {
 
 // resolveEntries returns the ordered provider+model list for this request.
 // On error it returns a non-empty errMsg and the appropriate HTTP status code.
-func resolveEntries(req *models.ChatRequest, resolver *alias.Resolver) ([]alias.Entry, int, string) {
+func resolveEntries(req *models.ChatRequest, resolver *alias.Resolver, reqID string) ([]alias.Entry, int, string) {
 	if req.Task != "" {
 		if !resolver.Enabled() {
 			return nil, http.StatusBadRequest, "task field requires alias config (ALIAS_CONFIG not set)"
 		}
 		if req.Provider != "" || req.Model != "" {
-			log.Printf("warn: both task and provider/model set — task %q takes precedence", req.Task)
+			slog.Warn("both task and provider/model set, task takes precedence", "request_id", reqID, "task", req.Task)
 		}
 		entries, err := resolver.Resolve(req.Task)
 		if err != nil {
@@ -235,6 +237,7 @@ func handleChatWithFallback(
 	requestStart time.Time,
 	cacheLatencyMs float64,
 	collector metrics.Collector,
+	reqID string,
 ) {
 	ctx := gc.Request.Context()
 	var lastErr error
@@ -242,7 +245,7 @@ func handleChatWithFallback(
 	for i, entry := range entries {
 		p, ok := providers[entry.Provider]
 		if !ok {
-			log.Printf("alias: provider %q not registered, skipping entry %d/%d", entry.Provider, i+1, len(entries))
+			slog.Warn("provider not registered, skipping entry", "request_id", reqID, "provider", entry.Provider, "attempt", i+1, "total", len(entries))
 			lastErr = errors.New("no available provider")
 			continue
 		}
@@ -257,7 +260,7 @@ func handleChatWithFallback(
 				gc.JSON(http.StatusTooManyRequests, gin.H{"error": "token rate limit exceeded"})
 				return
 			}
-			log.Printf("reserve error: %v", err)
+			slog.Error("rate limiter reserve failed", "request_id", reqID, "err", err)
 			gc.JSON(http.StatusInternalServerError, gin.H{"error": "rate limiter unavailable"})
 			return
 		}
@@ -274,16 +277,16 @@ func handleChatWithFallback(
 			}
 			if i < len(entries)-1 {
 				if errors.Is(err, provider.ErrCircuitOpen) {
-					log.Printf("alias: attempt %d/%d skipped — circuit open for %q, trying next entry", i+1, len(entries), entry.Provider)
+					slog.Warn("alias attempt skipped: circuit open", "request_id", reqID, "provider", entry.Provider, "attempt", i+1, "total", len(entries))
 				} else {
-					log.Printf("alias: attempt %d/%d failed (%v), trying next entry", i+1, len(entries), err)
+					slog.Warn("alias attempt failed, trying next entry", "request_id", reqID, "provider", entry.Provider, "attempt", i+1, "total", len(entries), "err", err)
 				}
 			}
 			continue
 		}
 
 		if err := limiter.Commit(ctx, apiKey, token, resp.Usage.TotalTokens); err != nil {
-			log.Printf("commit error (non-fatal): %v", err)
+			slog.Warn("commit error (non-fatal)", "request_id", reqID, "err", err)
 		}
 		resp.ResolvedProvider = entry.Provider
 
@@ -340,6 +343,7 @@ func handleStreamWithFallback(
 	requestStart time.Time,
 	cacheLatencyMs float64,
 	collector metrics.Collector,
+	reqID string,
 ) {
 	ctx := gc.Request.Context()
 	var lastErr error
@@ -348,7 +352,7 @@ func handleStreamWithFallback(
 	for i, entry := range entries {
 		p, ok := providers[entry.Provider]
 		if !ok {
-			log.Printf("alias: provider %q not registered, skipping entry %d/%d", entry.Provider, i+1, len(entries))
+			slog.Warn("provider not registered, skipping entry", "request_id", reqID, "provider", entry.Provider, "attempt", i+1, "total", len(entries))
 			lastErr = errors.New("no available provider")
 			continue
 		}
@@ -365,7 +369,7 @@ func handleStreamWithFallback(
 				}
 				return
 			}
-			log.Printf("reserve error: %v", err)
+			slog.Error("rate limiter reserve failed", "request_id", reqID, "err", err)
 			if !headersSent {
 				gc.JSON(http.StatusInternalServerError, gin.H{"error": "rate limiter unavailable"})
 			}
@@ -382,9 +386,9 @@ func handleStreamWithFallback(
 			}
 			if i < len(entries)-1 {
 				if errors.Is(err, provider.ErrCircuitOpen) {
-					log.Printf("alias: stream attempt %d/%d skipped — circuit open for %q, trying next", i+1, len(entries), entry.Provider)
+					slog.Warn("alias stream attempt skipped: circuit open", "request_id", reqID, "provider", entry.Provider, "attempt", i+1, "total", len(entries))
 				} else {
-					log.Printf("alias: stream attempt %d/%d failed to start (%v), trying next", i+1, len(entries), err)
+					slog.Warn("alias stream attempt failed to start, trying next", "request_id", reqID, "provider", entry.Provider, "attempt", i+1, "total", len(entries), "err", err)
 				}
 			}
 			continue
@@ -423,9 +427,9 @@ func handleStreamWithFallback(
 						retry = ctx.Err() == nil && provider.IsRetriable(event.Err)
 						if retry && i < len(entries)-1 {
 							if errors.Is(event.Err, provider.ErrCircuitOpen) {
-								log.Printf("alias: stream attempt %d/%d skipped — circuit open for %q, trying next", i+1, len(entries), entry.Provider)
+								slog.Warn("alias stream attempt skipped: circuit open", "request_id", reqID, "provider", entry.Provider, "attempt", i+1, "total", len(entries))
 							} else {
-								log.Printf("alias: stream attempt %d/%d failed before content (%v), trying next", i+1, len(entries), event.Err)
+								slog.Warn("alias stream attempt failed before content, trying next", "request_id", reqID, "provider", entry.Provider, "attempt", i+1, "total", len(entries), "err", event.Err)
 							}
 						}
 						break eventLoop
@@ -436,7 +440,7 @@ func handleStreamWithFallback(
 						finalUsage = event.Usage
 					}
 					if err := limiter.Commit(ctx, apiKey, token, actual); err != nil {
-						log.Printf("stream commit (non-fatal): %v", err)
+						slog.Warn("stream commit error (non-fatal)", "request_id", reqID, "err", err)
 					}
 					success = true
 					break eventLoop

@@ -88,10 +88,24 @@ Active development state. See CLAUDE.md for static technical context.
 - CORS middleware (`gin-contrib/cors`) registered globally; `CORS_ORIGIN` env controls the
   allowed origin (default `http://localhost:5173`); preflight cached 12h.
 
+### Request Logging
+
+- `internal/reqlog`: `Middleware()` assigns a per-request ID (`crypto/rand`), sets it as the
+  `X-Request-ID` response header, and emits one structured `slog` JSON line per request
+  (`method`, `path`, `status`, `latency_ms`, `client_ip`, `api_key_hash`) after it completes.
+  API keys are hashed (SHA-256), never logged in the clear; no prompt/response content is logged.
+- `cmd/gateway/main.go`: `gin.Default()` replaced with `gin.New()` + `gin.Recovery()` +
+  `reqlog.Middleware()`; `slog.SetDefault` set to a JSON handler on stdout, which also
+  structures the existing `log.Printf` startup/config lines for free.
+- `internal/api/routes.go`: request ID threaded through `resolveEntries`,
+  `handleChatWithFallback`, and `handleStreamWithFallback`; all fallback-loop `log.Printf`
+  calls (reserve errors, circuit-open skips, retry attempts) converted to `slog.Warn`/
+  `slog.Error` carrying `request_id`, so every log line for one request can be correlated.
+
 ## Next Steps
 
-Dashboard milestone (Steps 1–6) is complete on `main`. No feature is currently scoped —
-candidates for the next milestone: request logging, auth key management, or cost budget
+Dashboard milestone (Steps 1–6) and request logging are complete on `main`. No feature is
+currently scoped — candidates for the next milestone: auth key management or cost budget
 enforcement.
 
 ---
@@ -124,3 +138,45 @@ the `dashboard/` Vite + React + Recharts app consuming both; added CORS middlewa
   on it.
 - **Next:** scope the next feature (request logging, auth key management, or cost
   budget enforcement).
+
+### 2026-07-13 — Request logging
+
+- Added `internal/reqlog` (`Middleware()` + tests): per-request ID, `X-Request-ID` response
+  header, one structured `slog` JSON access-log line per request, API key logged as a
+  SHA-256 hash only, no prompt/response content logged.
+- Wired into `cmd/gateway/main.go` (`gin.New()` + `Recovery` + `reqlog.Middleware()`,
+  `slog.SetDefault` JSON handler) and `internal/api/routes.go` (request ID threaded through
+  the fallback loop; all `log.Printf` calls there converted to structured `slog` calls).
+- Verified manually against a running gateway + local Redis: `X-Request-ID` header matches
+  the log line's `request_id`, and fallback-loop warnings correlate to the same request ID
+  as the final access-log line. `go test ./... -race` green.
+- **Next:** scope auth key management or cost budget enforcement.
+
+## 2026-07-13 09:19
+
+- Added `brainstorm.md` capturing project goals, MVP scope, and high-level design ideas for routing, failover, streaming, and rate limiting — serves as a design reference doc.
+- Added `.markdownlint.json` to enforce markdown style (120-char line limit, HTML allowed) across the repo.
+- Neither file is wired into any build or test path; both are doc/config only.
+- Next: reconcile `brainstorm.md`'s "fixed-window rate limiting" description with the sliding-window implementation in `internal/ratelimit/limiter.go`.
+- Next: if cost/latency routing is revisited, use `brainstorm.md`'s routing ideas as a starting point for a concrete provider-selection algorithm.
+
+
+## 2026-07-13 09:31
+
+- Added `brainstorm.md` capturing project goals, MVP scope, and design ideas for routing, failover, streaming, and rate limiting — serves as a retroactive design reference.
+- Added `.markdownlint.json` enforcing 120-char line limit with HTML and table length checks disabled; neither file is wired into build or test paths.
+- Both files are untracked and need to be committed.
+- Next: reconcile `brainstorm.md`'s "fixed-window rate limiting" description with the sliding-window implementation in `internal/ratelimit/limiter.go`.
+- Next: if cost/latency routing is revisited, use `brainstorm.md` routing ideas as the starting point for a concrete provider-selection algorithm.
+
+
+## 2026-07-13 10:06
+
+Now I have enough context. Here are the bullet points:
+
+- Added `internal/reqlog` package: Gin middleware that stamps every request with a random 8-byte hex ID, returns it as `X-Request-ID`, and emits one structured JSON log line (method, path, status, latency, client IP, SHA-256-hashed API key) via `log/slog`.
+- Switched gateway from `gin.Default()` to `gin.New()` + `gin.Recovery()` + `reqlog.Middleware()`; set `slog` JSON handler as the process-wide default logger.
+- Migrated `internal/api/routes.go` from `log` to `log/slog`; `reqID` extracted from context so fallback-loop warnings can be correlated to the access log entry.
+- Tests cover: header presence, JSON log shape, API key hashing (never logged in clear), and unique ID generation across requests.
+- **Next:** thread `reqID` through all fallback-loop `slog` calls in `routes.go`; add request ID to circuit-breaker and streaming-failover log events; update `CLAUDE.md` to mention the `reqlog` package.
+

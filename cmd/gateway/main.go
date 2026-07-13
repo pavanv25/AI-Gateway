@@ -2,6 +2,7 @@ package main
 
 import (
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"strconv"
@@ -9,18 +10,21 @@ import (
 
 	cors "github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
-	"github.com/redis/go-redis/v9"
 	"github.com/pavanv25/ai-gateway/internal/alias"
 	"github.com/pavanv25/ai-gateway/internal/api"
 	"github.com/pavanv25/ai-gateway/internal/cache"
 	"github.com/pavanv25/ai-gateway/internal/metrics"
 	"github.com/pavanv25/ai-gateway/internal/provider"
 	"github.com/pavanv25/ai-gateway/internal/ratelimit"
+	"github.com/pavanv25/ai-gateway/internal/reqlog"
+	"github.com/redis/go-redis/v9"
 )
 
 const defaultTPMLimit = 60_000
 
 func main() {
+	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
+
 	tpmLimit := defaultTPMLimit
 	if raw := os.Getenv("TPM_LIMIT"); raw != "" {
 		if v, err := strconv.Atoi(raw); err == nil && v > 0 {
@@ -123,7 +127,9 @@ func main() {
 	}
 	log.Printf("CORS allowed origin: %s", corsOrigin)
 
-	r := gin.Default()
+	r := gin.New()
+	r.Use(gin.Recovery())
+	r.Use(reqlog.Middleware())
 	r.Use(cors.New(cors.Config{
 		AllowOrigins: []string{corsOrigin},
 		AllowMethods: []string{"GET", "POST", "OPTIONS"},
