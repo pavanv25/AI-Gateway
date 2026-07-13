@@ -52,8 +52,6 @@ Active development state. See CLAUDE.md for static technical context.
 - `CacheHit bool` added to `ChatResponse` in `pkg/models/models.go`.
 - Enabled when `QDRANT_URL` + `OPENAI_API_KEY` are set; lazy init at startup.
 
----
-
 ### Circuit Breaker & Provider Cooldown
 
 - 3-state machine (Closed / Open / HalfOpen) per provider, in-memory, goroutine-safe.
@@ -62,89 +60,67 @@ Active development state. See CLAUDE.md for static technical context.
 - `ErrCircuitOpen` is retriable — fallback loop skips to the next alias entry automatically.
 - Configurable via `CB_FAILURE_THRESHOLD` and `CB_COOLDOWN_SECONDS`; opt-in (unset = disabled).
 
+### Metrics & Cost Tracking
+
+- `internal/metrics`: `MetricEvent` struct + `Collector` interface; `NoopCollector` default.
+- `chatHandler` emits one `MetricEvent` per request — provider, model, latency, token counts,
+  cache-hit flag, fallback attempts, and `CostUSD`.
+- `Store`: thread-safe in-memory aggregator using 1-minute buckets (60 retained, 1h window).
+  Latency slices reservoir-sampled at 1000/bucket; p50/p95 computed at query time.
+  Bucket map keyed on `int64` UTC Unix timestamp to avoid `time.Time` equality traps.
+  Eviction runs on `Query()` to keep the `Record()` hot path fast.
+- `EstimateCost`: hardcoded pricing table for 5 models (gpt-4o, gpt-4o-mini,
+  claude-sonnet-4-6, claude-opus-4-7, claude-haiku-4-5-20251001). Unknown models log
+  a one-time warning via `sync.Map`; mock/cache providers return $0.
+- Cache-hit cost uses `cached.ResolvedProvider` + `cached.Model` (not `req.Model`) so
+  task-based requests with empty `req.Model` get accurate estimates.
+- `metrics.NewStore()` wired as the live `Collector` in `cmd/gateway/main.go`.
+
+### Metrics Dashboard
+
+- `GET /metrics?window=Nm` JSON snapshot and `GET /metrics/stream` SSE endpoints in
+  `internal/api/routes.go`, both auth-gated via `AuthMiddleware`; `Store.Query(window)`
+  returns aggregated p50/p95 latency, token counts, cost, and per-provider breakdowns.
+- `dashboard/`: standalone Vite + React + Recharts app. Components: `StatCard`,
+  `BreakdownChart`, `LatencyChart`, `RequestRateChart`, `EventLog`. Snapshot polling via
+  `useSnapshot`, live updates via `useSSEEvents`. Shared types in `types.ts`, API calls in
+  `api.ts`, Vite dev-server proxy forwards `/metrics` to the Go gateway.
+- CORS middleware (`gin-contrib/cors`) registered globally; `CORS_ORIGIN` env controls the
+  allowed origin (default `http://localhost:5173`); preflight cached 12h.
+
 ## Next Steps
 
-- **Alias integration tests** — `MockProvider` covering entry-1 retriable
-  failure → entry-2 fallback and non-retriable 4xx immediate break.
-- **Streaming failover tests** — cover the `contentSent` guard in
-  `handleStreamWithFallback`.
-- **SemanticCache unit tests** — mock Qdrant HTTP server covering hit, miss,
-  and store-failure paths.
+Dashboard milestone (Steps 1–6) is complete on `main`. No feature is currently scoped —
+candidates for the next milestone: request logging, auth key management, or cost budget
+enforcement.
 
 ---
 
-## Session Log — 2026-06-01
+## Session Log
 
-- Condensed `PROGRESS.md` from ~194 lines to a tighter format; removed stale
-  detail that duplicated `CLAUDE.md`.
-- Updated `CLAUDE.md` with `QDRANT_URL`, `QDRANT_API_KEY`, and `CACHE_TTL`
-  env var entries, closing out the docs next step.
-- Cleaned up leftover worktrees (`cleanup-progress-md`, `readme-semantic-cache`,
-  and others) after merging prior PRs.
-- **Next:** write alias integration tests (`MockProvider` retriable fallback),
-  streaming failover tests (`contentSent` guard), and SemanticCache unit tests
-  (mock Qdrant HTTP server).
+### 2026-06-03 — Metrics foundation (Steps 1–3)
 
-## Session Log — 2026-06-01 (end of session)
+Implemented `MetricEvent`/`Collector` interface, thread-safe in-memory `Store` with
+reservoir-sampled p50/p95, and hardcoded pricing table with per-request `CostUSD`
+computation at all three `collector.Record` sites. Each step reviewed by a dedicated
+reviewer subagent before execution.
 
-- Cleaned up stale worktrees (`cleanup-progress-md`, `effervescent-foraging-rabbit`, `eventual-plotting-flask`, `jovial-payne-a3ecbd`, `readme-semantic-cache`) left over from merged PRs.
-- Condensed `PROGRESS.md` (~108 lines removed) and updated `CLAUDE.md` with `QDRANT_URL`, `QDRANT_API_KEY`, and `CACHE_TTL` env var docs; no code changes.
-- **Next:** write alias integration tests (`MockProvider` retriable fallback → entry-2 advance, non-retriable 4xx break).
-- **Next:** add streaming failover tests covering the `contentSent` guard in `handleStreamWithFallback`.
-- **Next:** add `SemanticCache` unit tests with a mock Qdrant HTTP server (hit, miss, store-failure paths).
+### 2026-07-10 — Metrics endpoints, dashboard, CORS (Steps 4–6)
 
+Added `GET /metrics` JSON snapshot and `GET /metrics/stream` SSE endpoints; scaffolded
+the `dashboard/` Vite + React + Recharts app consuming both; added CORS middleware
+(`CORS_ORIGIN` env) and README dev-setup docs. This closed out the dashboard milestone.
 
-## 2026-06-01 16:46
+### 2026-07-13 — Repo hygiene sweep
 
-- Cleaned up stale worktrees from merged PRs and tightened `PROGRESS.md` (~108 lines removed, no code changes).
-- Updated `CLAUDE.md` with `QDRANT_URL`, `QDRANT_API_KEY`, `CACHE_TTL` env var docs.
-- **Next:** alias integration tests (`MockProvider` retriable fallback → entry-2, non-retriable 4xx break), streaming failover tests (`contentSent` guard), and `SemanticCache` unit tests with a mock Qdrant HTTP server.
-
-## 2026-06-01 (end of session)
-
-- Reformatted `CLAUDE.md`: replaced free-form prose with structured Tech Stack list, expanded Project Layout to include `cache/` and missing `_test.go` files, added env var table with `QDRANT_URL`, `QDRANT_API_KEY`, and `CACHE_TTL`.
-- Condensed `PROGRESS.md` by ~108 lines; removed stale detail already captured in `CLAUDE.md`.
-- Removed five stale worktrees (`cleanup-progress-md`, `effervescent-foraging-rabbit`, `eventual-plotting-flask`, `jovial-payne-a3ecbd`, `readme-semantic-cache`) left over from merged PRs.
-- **Next:** alias integration tests — `MockProvider` retriable fallback advancing to entry-2, non-retriable 4xx breaking immediately.
-- **Next:** streaming failover tests (`contentSent` guard) and `SemanticCache` unit tests with a mock Qdrant HTTP server.
-
-
-## 2026-06-01 16:54
-
-PROGRESS.md updated with a 5-bullet session entry covering the `CLAUDE.md` restructure, `PROGRESS.md` condensation, worktree cleanup, and the three pending test gaps.
-
-## 2026-06-01 (latest)
-
-- Reformatted `CLAUDE.md` into structured Tech Stack + env var table; expanded Project Layout to include `cache/` and `_test.go` files.
-- Condensed `PROGRESS.md` by ~108 lines, removing stale session noise that duplicated static docs.
-- Removed five merged-PR worktrees (`cleanup-progress-md`, `effervescent-foraging-rabbit`, `eventual-plotting-flask`, `jovial-payne-a3ecbd`, `readme-semantic-cache`).
-- **Next:** alias integration tests — `MockProvider` retriable fallback → entry-2 advance, non-retriable 4xx break.
-- **Next:** streaming failover tests (`contentSent` guard) and `SemanticCache` unit tests with a mock Qdrant HTTP server.
-
-
-## 2026-06-01 16:55
-
-- Reformatted `CLAUDE.md` into structured Tech Stack + env var table; expanded Project Layout to include `cache/` and `_test.go` files.
-- Condensed `PROGRESS.md` by ~108 lines, removing stale session noise that duplicated static docs.
-- Removed five merged-PR worktrees (`cleanup-progress-md`, `effervescent-foraging-rabbit`, `eventual-plotting-flask`, `jovial-payne-a3ecbd`, `readme-semantic-cache`).
-- **Next:** alias integration tests — `MockProvider` retriable fallback → entry-2 advance, non-retriable 4xx break.
-- **Next:** streaming failover tests (`contentSent` guard) and `SemanticCache` unit tests with a mock Qdrant HTTP server.
-
-
-## 2026-06-01 16:57
-
-- Restructured `CLAUDE.md` with a Tech Stack list, expanded Project Layout (added `cache/`, `_test.go` entries), and an env var table covering `QDRANT_URL`, `QDRANT_API_KEY`, and `CACHE_TTL`.
-- Condensed `PROGRESS.md` by ~108 lines, removing duplicated session noise already captured in static docs.
-- Removed five stale worktrees (`cleanup-progress-md`, `effervescent-foraging-rabbit`, `eventual-plotting-flask`, `jovial-payne-a3ecbd`, `readme-semantic-cache`) left over from merged PRs.
-- **Next:** alias integration tests — `MockProvider` retriable fallback advancing to entry-2, non-retriable 4xx breaking immediately.
-- **Next:** streaming failover tests (`contentSent` guard) and `SemanticCache` unit tests with a mock Qdrant HTTP server (hit, miss, store-failure paths).
-
-
-## 2026-06-01 17:52
-
-- Instrumented `chatHandler` and fallback handlers with `metrics.Collector` — emits `MetricEvent` on every cache hit and provider response, capturing latency (`RequestLatencyMs`, `CacheLatencyMs`, `ProviderLatencyMs`), token counts, and stream flag.
-- Added `NoopCollector{}` as a zero-value fallback in `RegisterRoutes` so a nil collector is safe without callers changing.
-- Started `circuit-breaker` worktree — pattern suggests per-provider open/half-open/closed state to stop retrying persistently failing backends.
-- **Next:** implement a `metrics.Exporter` (Prometheus or log-based) that consumes `MetricEvent` from `Collector`; wire into `cmd/gateway/main.go`.
-- **Next:** finish circuit breaker in the open worktree and add alias integration tests covering `MockProvider` retriable fallback → entry-2 advance and non-retriable 4xx break.
-
+- Removed 6 stale worktrees and their branches (`circuit-breaker`,
+  `cleanup-progress-md`, `effervescent-foraging-rabbit`, `eventual-plotting-flask`,
+  `jovial-payne-a3ecbd`, `readme-semantic-cache`) — all fully merged into `main` or
+  superseded by this cleanup.
+- Deleted the stray `gateway` build artifact from the repo root; added `/gateway` to
+  `.gitignore`.
+- Pruned this file — collapsed roughly 30 near-duplicate session-log entries that had
+  repeated the same "remove stale worktrees" TODO across many sessions without acting
+  on it.
+- **Next:** scope the next feature (request logging, auth key management, or cost
+  budget enforcement).

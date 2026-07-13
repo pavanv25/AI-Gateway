@@ -4,7 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Go-based AI Gateway that routes requests between multiple LLM providers (OpenAI, Anthropic) through a unified API. Enforces per-API-key token-per-minute rate limiting via Redis.
+Go-based AI Gateway that routes requests between multiple LLM providers (OpenAI, Anthropic)
+through a unified API. Enforces per-API-key token-per-minute rate limiting via Redis.
 
 ## Key Commands
 
@@ -20,17 +21,20 @@ go mod tidy
 Endpoints: `POST /v1/chat` (requires `X-API-Key` header), `GET /health`.
 
 Environment variables:
+
 - `TPM_LIMIT` — tokens per minute cap, default `60000`
 - `REDIS_URL` — Redis connection string, default `redis://localhost:6379`
 - `OPENAI_API_KEY` — enables the OpenAI provider (optional)
 - `ANTHROPIC_API_KEY` — enables the Anthropic provider (optional)
 - `ALIAS_CONFIG` — path to a YAML alias config file (optional; alias feature disabled if unset)
-- `CB_FAILURE_THRESHOLD` — consecutive failures (5xx, 429, network) to open a circuit breaker per provider; unset or `0` disables circuit breakers (opt-in)
-- `CB_COOLDOWN_SECONDS` — seconds a circuit stays Open before allowing a single probe request (default `60` when threshold is set)
+- `CB_FAILURE_THRESHOLD` — consecutive failures (5xx, 429, network) to open a circuit breaker
+  per provider; unset or `0` disables circuit breakers (opt-in)
+- `CB_COOLDOWN_SECONDS` — seconds a circuit stays Open before allowing a single probe request
+  (default `60` when threshold is set)
 
 ## Project Layout
 
-```
+```text
 cmd/gateway/              entry point — wires Redis, Limiter, providers, alias resolver, Gin router
 config/
   aliases.example.yaml    example alias config; copy and set ALIAS_CONFIG to use
@@ -59,17 +63,26 @@ pkg/models/models.go      ChatRequest (+ Task), ChatResponse (+ ResolvedProvider
 
 Every `POST /v1/chat` passes through these stages in order:
 
-1. **Auth** (`ratelimit.AuthMiddleware`) — extracts `X-API-Key`; 401 if absent. Key is stored in Gin context under `ratelimit.APIKeyContextKey`.
-2. **Entry resolution** (`resolveEntries`) — if `task` is set, `alias.Resolver.Resolve` returns an ordered `[]alias.Entry{provider, model}`. If `task` is absent, a single entry is built from `provider`+`model` fields directly.
+1. **Auth** (`ratelimit.AuthMiddleware`) — extracts `X-API-Key`; 401 if absent. Key is stored
+   in Gin context under `ratelimit.APIKeyContextKey`.
+2. **Entry resolution** (`resolveEntries`) — if `task` is set, `alias.Resolver.Resolve` returns
+   an ordered `[]alias.Entry{provider, model}`. If `task` is absent, a single entry is built from
+   `provider`+`model` fields directly.
 3. **Fallback loop** (per entry, in order):
-   - `limiter.Reserve` — atomically checks sliding-window capacity and writes a reservation (`id:maxTokens` member) to the Redis sorted set. Returns `ErrLimitExceeded` (→ 429) or an opaque token.
+   - `limiter.Reserve` — atomically checks sliding-window capacity and writes a reservation
+     (`id:maxTokens` member) to the Redis sorted set. Returns `ErrLimitExceeded` (→ 429) or an
+     opaque token.
    - `p.Chat` / `p.ChatStream` — calls the upstream provider.
-   - On success: `limiter.Commit` replaces the reservation with actual token count. Response includes `resolved_provider`.
+   - On success: `limiter.Commit` replaces the reservation with actual token count. Response
+     includes `resolved_provider`.
    - On retriable error (5xx, HTTP 429): Commit 0 tokens, log, advance to next entry.
    - On non-retriable error (4xx, context cancel): break immediately.
-4. **Streaming failover constraint** — SSE headers are flushed lazily on the first content delta. Failover to the next entry is only possible if the error occurs *before* any content is sent to the client (`contentSent` flag in `handleStreamWithFallback`).
+4. **Streaming failover constraint** — SSE headers are flushed lazily on the first content delta.
+   Failover to the next entry is only possible if the error occurs *before* any content is sent to
+   the client (`contentSent` flag in `handleStreamWithFallback`).
 
-The `mock` provider is always registered (no API key needed) and is the only provider available without env vars — useful for local testing.
+The `mock` provider is always registered (no API key needed) and is the only provider available
+without env vars — useful for local testing.
 
 ## Scaffolding Rules
 

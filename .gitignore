@@ -1,5 +1,6 @@
 # Compiled binaries
 bin/
+/gateway
 *.exe
 *.exe~
 *.dll
