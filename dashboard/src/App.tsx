@@ -5,6 +5,8 @@ import { StatCard } from './components/StatCard'
 import { RequestRateChart } from './components/RequestRateChart'
 import { LatencyChart } from './components/LatencyChart'
 import { BreakdownChart } from './components/BreakdownChart'
+import { KeyBreakdownChart } from './components/KeyBreakdownChart'
+import { StatusPanel } from './components/StatusPanel'
 import { EventLog } from './components/EventLog'
 
 function useLocalStorage(key: string, initial: string): [string, (v: string) => void] {
@@ -25,6 +27,9 @@ export default function App() {
 
   const totals = snapshot?.Totals ?? null
   const breakdowns = snapshot?.Breakdowns ?? []
+  const keyBreakdowns = snapshot?.KeyBreakdowns ?? []
+  const rateLimit = snapshot?.RateLimit ?? { Used: 0, Limit: 0 }
+  const circuitBreakers = snapshot?.CircuitBreakers ?? null
 
   const totalCacheOps = (totals?.CacheHits ?? 0) + (totals?.CacheMisses ?? 0)
   const cacheHitRate =
@@ -72,6 +77,8 @@ export default function App() {
 
       {apiKey && (
         <>
+          <StatusPanel rateLimit={rateLimit} circuitBreakers={circuitBreakers} />
+
           <div className="stat-row">
             <StatCard label="Requests" value={totals?.RequestCount ?? 0} />
             <StatCard
@@ -102,6 +109,10 @@ export default function App() {
             <div className="chart-card">
               <h2>Provider / Model Breakdown</h2>
               <BreakdownChart breakdowns={breakdowns} />
+            </div>
+            <div className="chart-card">
+              <h2>Usage by API Key</h2>
+              <KeyBreakdownChart breakdowns={keyBreakdowns} />
             </div>
           </div>
 

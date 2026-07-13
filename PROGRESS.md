@@ -87,6 +87,14 @@ Active development state. See CLAUDE.md for static technical context.
   `api.ts`, Vite dev-server proxy forwards `/metrics` to the Go gateway.
 - CORS middleware (`gin-contrib/cors`) registered globally; `CORS_ORIGIN` env controls the
   allowed origin (default `http://localhost:5173`); preflight cached 12h.
+- `GET /metrics` also returns `KeyBreakdowns` (per-`APIKeyHash` aggregates, capped to the
+  top 10 by `RequestCount` with the remainder rolled into an `"other"` entry — see
+  `internal/metrics/store.go`'s `bucketSet.byKey` and `topNKeyBreakdowns`), `RateLimit`
+  (`{Used, Limit}` — the *caller's own* current TPM usage via a new non-mutating
+  `Limiter.Usage` read, `internal/ratelimit/limiter.go`), and `CircuitBreakers`
+  (`[]{Provider, State}` via a new `CircuitBreaker.State()` getter, `"n/a"` when breakers
+  are disabled). Frontend: `KeyBreakdownChart` (truncated 8-char hash labels) and
+  `StatusPanel` (TPM usage bar + per-provider state badges) added to `dashboard/`.
 
 ### Request Logging
 
@@ -104,9 +112,10 @@ Active development state. See CLAUDE.md for static technical context.
 
 ## Next Steps
 
-Dashboard milestone (Steps 1–6) and request logging are complete on `main`. No feature is
-currently scoped — candidates for the next milestone: auth key management or cost budget
-enforcement.
+Dashboard milestone (Steps 1–6), request logging, and the per-API-key breakdown /
+rate-limit + circuit-breaker status panel dashboard additions are complete on `main`.
+No feature is currently scoped — candidates for the next milestone: auth key management
+or cost budget enforcement.
 
 ---
 
@@ -152,31 +161,77 @@ the `dashboard/` Vite + React + Recharts app consuming both; added CORS middlewa
   as the final access-log line. `go test ./... -race` green.
 - **Next:** scope auth key management or cost budget enforcement.
 
-## 2026-07-13 09:19
+### 2026-07-13 — Design docs & linting config
 
-- Added `brainstorm.md` capturing project goals, MVP scope, and high-level design ideas for routing, failover, streaming, and rate limiting — serves as a design reference doc.
-- Added `.markdownlint.json` to enforce markdown style (120-char line limit, HTML allowed) across the repo.
-- Neither file is wired into any build or test path; both are doc/config only.
-- Next: reconcile `brainstorm.md`'s "fixed-window rate limiting" description with the sliding-window implementation in `internal/ratelimit/limiter.go`.
-- Next: if cost/latency routing is revisited, use `brainstorm.md`'s routing ideas as a starting point for a concrete provider-selection algorithm.
+- Added `brainstorm.md` as a retroactive design reference capturing MVP scope, request flow, and early ideas on routing, failover, streaming, and rate limiting.
+- Added `.markdownlint.json` enforcing a 120-char line limit with table and inline-HTML checks disabled; config only, not wired into any build or test path.
+- **Next:** reconcile `brainstorm.md`'s fixed-window rate-limiting framing with the sliding-window TPM implementation in `internal/ratelimit/limiter.go`.
+- **Next:** if cost/latency routing is revisited, use `brainstorm.md` as the starting point for a concrete provider-selection algorithm in `internal/alias/`.
+- **Next:** commit both files so the brainstorm is tracked in git history alongside the implementation.
 
+## 2026-07-13 11:37
 
-## 2026-07-13 09:31
-
-- Added `brainstorm.md` capturing project goals, MVP scope, and design ideas for routing, failover, streaming, and rate limiting — serves as a retroactive design reference.
-- Added `.markdownlint.json` enforcing 120-char line limit with HTML and table length checks disabled; neither file is wired into build or test paths.
-- Both files are untracked and need to be committed.
-- Next: reconcile `brainstorm.md`'s "fixed-window rate limiting" description with the sliding-window implementation in `internal/ratelimit/limiter.go`.
-- Next: if cost/latency routing is revisited, use `brainstorm.md` routing ideas as the starting point for a concrete provider-selection algorithm.
+PROGRESS.md updated — collapsed the six near-duplicate session entries into a single clean `### 2026-07-13 — Design docs & linting config` block with 5 bullets covering what was added and three concrete next steps.
 
 
-## 2026-07-13 10:06
+## 2026-07-13 11:39
 
-Now I have enough context. Here are the bullet points:
+- Added `brainstorm.md` as a retroactive design reference: MVP scope, request-flow diagram, and early routing/failover/streaming/rate-limiting ideas that predate the current implementation.
+- Added `.markdownlint.json` enforcing a 120-char line limit; table and inline-HTML checks disabled. Not wired into any build or test path — config only.
+- Pruned `PROGRESS.md`: collapsed near-duplicate session-log entries (net −16 lines).
+- **Next:** commit `brainstorm.md` and `.markdownlint.json` so both are tracked in git history.
+- **Next:** reconcile `brainstorm.md`'s fixed-window rate-limiting framing with the sliding-window TPM implementation in `internal/ratelimit/limiter.go`.
 
-- Added `internal/reqlog` package: Gin middleware that stamps every request with a random 8-byte hex ID, returns it as `X-Request-ID`, and emits one structured JSON log line (method, path, status, latency, client IP, SHA-256-hashed API key) via `log/slog`.
-- Switched gateway from `gin.Default()` to `gin.New()` + `gin.Recovery()` + `reqlog.Middleware()`; set `slog` JSON handler as the process-wide default logger.
-- Migrated `internal/api/routes.go` from `log` to `log/slog`; `reqID` extracted from context so fallback-loop warnings can be correlated to the access log entry.
-- Tests cover: header presence, JSON log shape, API key hashing (never logged in clear), and unique ID generation across requests.
-- **Next:** thread `reqID` through all fallback-loop `slog` calls in `routes.go`; add request ID to circuit-breaker and streaming-failover log events; update `CLAUDE.md` to mention the `reqlog` package.
+### 2026-07-13 — Per-API-key breakdown + rate-limit/circuit-breaker status panel
+
+- `internal/ratelimit/limiter.go`: added `Limiter.Usage(ctx, apiKey) (used, limit int, err error)`
+  backed by a new non-mutating `peekLua` script (prunes expired entries, sums remaining
+  reservations, no `ZADD`/`EXPIRE`) — safe to poll on every dashboard refresh.
+- `internal/provider/circuit.go`: added `CircuitBreaker.State()` (locking getter) and
+  `State.String()` (`"closed"`/`"open"`/`"half_open"`).
+- `internal/metrics/store.go`: added a `byKey map[string]*bucket` dimension to `bucketSet`
+  (parallel to the existing `byPM`), populated from `MetricEvent.APIKeyHash`. `Query()` now
+  returns `Snapshot.KeyBreakdowns`, capped to the top 10 keys by `RequestCount` via
+  `topNKeyBreakdowns`, with the remainder folded into a single `APIKeyHash: "other"` entry.
+- `internal/api/routes.go`: `metricsHandler` now also takes `limiter` and `providers`;
+  `GET /metrics` response is a `metricsResponse` wrapping `Snapshot` with `RateLimit`
+  (caller's own usage) and `CircuitBreakers` (per-provider state, `"n/a"` when breakers
+  are disabled — type-asserts each `provider.Provider` to `*provider.CircuitBreaker`).
+- `dashboard/`: `KeyBreakdownChart` (clone of `BreakdownChart`, truncated 8-char hash
+  labels) and `StatusPanel` (TPM usage bar + colored per-provider state badges) added;
+  wired into `App.tsx` and `types.ts`.
+- Verified end-to-end: gateway + local Redis, `CB_FAILURE_THRESHOLD=1`, requests from two
+  distinct API keys — dashboard correctly split the key-breakdown chart, showed live TPM
+  usage, and reported the mock provider's circuit as `closed`. `go test ./... -race` and
+  `tsc --noEmit` both green.
+- **Next:** scope auth key management or cost budget enforcement.
+
+
+## 2026-07-13 12:00
+
+Now I have enough context. The session added per-API-key metrics breakdown, a non-mutating TPM usage peek, circuit breaker state exposure, and two new dashboard components. Here are the bullet points:
+
+- Added per-API-key aggregate metrics to `metrics.Store` (`bucketSet.byKey`, `topNKeyBreakdowns`): top-10 keys by request count, remainder rolled into an `"other"` entry.
+- Added `Limiter.Usage()` — a non-mutating Redis Lua peek that returns the caller's current TPM consumption alongside the configured limit, without writing a reservation.
+- Exposed `CircuitBreaker.State()` + `State.String()` and enriched `GET /metrics` to return `RateLimit` and `CircuitBreakers` fields alongside the existing `Snapshot`.
+- Dashboard: added `KeyBreakdownChart` (8-char truncated hash labels) and `StatusPanel` (TPM usage bar + per-provider state badges) to `App.tsx`.
+- Next: wire API-key management UI (create/revoke keys); add per-key cost budget enforcement with configurable hard/soft limits; extend `metricsStreamHandler` to push `RateLimit` and `CircuitBreakers` diffs over SSE.
+
+
+## 2026-07-13 13:58
+
+- Added per-API-key aggregate metrics to `metrics.Store` — parallel `byKey` dimension on `bucketSet`, `topNKeyBreakdowns` caps output to top-10 keys by request count with the remainder folded into an `"other"` entry.
+- Added non-mutating `Limiter.Usage()` backed by a new `peekLua` script (prunes expired entries, sums reservations, no writes) — safe to call on every dashboard refresh.
+- Exposed `CircuitBreaker.State()` + `State.String()` and enriched `GET /metrics` response with `RateLimit` (caller's own TPM usage) and `CircuitBreakers` (per-provider state, `"n/a"` when disabled).
+- Dashboard: new `KeyBreakdownChart` (8-char truncated hash labels) and `StatusPanel` (TPM progress bar + colored circuit-state badges) components wired into `App.tsx`; matching types added to `types.ts`.
+- **Next:** add API-key management endpoints (create/revoke); enforce per-key cost budget limits; push `RateLimit`/`CircuitBreakers` diffs over the existing SSE stream.
+
+
+## 2026-07-13 14:01
+
+- Added per-API-key aggregate metrics to `metrics.Store`: parallel `byKey` bucket dimension, `topNKeyBreakdowns` caps output to top-10 keys by request count with the remainder folded into an `"other"` entry.
+- Added non-mutating `Limiter.Usage()` backed by a new `peekLua` Lua script (prunes expired entries, sums reservations, no writes) — safe to poll on every dashboard refresh.
+- Exposed `CircuitBreaker.State()` + `State.String()` and enriched `GET /metrics` to return `RateLimit` (caller's TPM usage) and `CircuitBreakers` (per-provider state, `"n/a"` when disabled).
+- Dashboard: new `KeyBreakdownChart` and `StatusPanel` (TPM progress bar + colored circuit-state badges) wired into `App.tsx`; matching types in `types.ts`.
+- **Next:** add API-key management endpoints (create/revoke); enforce per-key cost budget limits; push `RateLimit`/`CircuitBreakers` diffs over the existing SSE stream.
 

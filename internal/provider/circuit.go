@@ -18,6 +18,20 @@ const (
 	StateHalfOpen              // one probe call allowed; outcome resets state
 )
 
+// String returns a lowercase, JSON-friendly name for the state.
+func (s State) String() string {
+	switch s {
+	case StateClosed:
+		return "closed"
+	case StateOpen:
+		return "open"
+	case StateHalfOpen:
+		return "half_open"
+	default:
+		return "unknown"
+	}
+}
+
 // Config holds circuit breaker parameters.
 type Config struct {
 	// FailureThreshold is the number of consecutive tripping failures (5xx, 429,
@@ -49,6 +63,13 @@ func New(p Provider, cfg Config) *CircuitBreaker {
 }
 
 func (cb *CircuitBreaker) Name() string { return cb.inner.Name() }
+
+// State returns the circuit breaker's current state. Safe for concurrent use.
+func (cb *CircuitBreaker) State() State {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	return cb.state
+}
 
 func (cb *CircuitBreaker) Chat(ctx context.Context, req *models.ChatRequest) (*models.ChatResponse, error) {
 	if err := cb.beforeCall(); err != nil {

@@ -174,7 +174,8 @@ header h1 {
   margin-bottom: 24px;
 }
 
-.charts-grid .chart-card:nth-child(3) {
+.charts-grid .chart-card:nth-child(3),
+.charts-grid .chart-card:nth-child(4) {
   grid-column: 1 / -1;
 }
 
@@ -270,5 +271,72 @@ header h1 {
 
 @media (max-width: 640px) {
   .charts-grid { grid-template-columns: 1fr; }
-  .charts-grid .chart-card:nth-child(3) { grid-column: 1; }
+  .charts-grid .chart-card:nth-child(3),
+  .charts-grid .chart-card:nth-child(4) { grid-column: 1; }
 }
+
+/* Status panel (rate limit usage + circuit breaker states) */
+.status-panel-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 16px 18px;
+  margin-bottom: 24px;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  flex-wrap: wrap;
+}
+
+.status-panel-usage {
+  flex: 1 1 240px;
+  min-width: 200px;
+}
+
+.status-panel-usage-label {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 500;
+  margin-bottom: 6px;
+}
+
+.usage-bar {
+  height: 8px;
+  border-radius: 99px;
+  background: var(--surface-hover);
+  overflow: hidden;
+}
+
+.usage-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  border-radius: 99px;
+  transition: width 0.3s ease;
+}
+
+.usage-bar-fill-warn {
+  background: var(--error);
+}
+
+.status-panel-breakers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.breaker-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 3px 8px;
+  border-radius: 99px;
+  white-space: nowrap;
+  font-family: var(--mono);
+}
+
+.breaker-closed { background: color-mix(in srgb, var(--success) 15%, transparent); color: var(--success); }
+.breaker-open { background: color-mix(in srgb, var(--error) 15%, transparent); color: var(--error); }
+.breaker-half_open { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+.breaker-n-a { background: color-mix(in srgb, var(--muted) 15%, transparent); color: var(--muted); }

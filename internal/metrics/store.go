@@ -9,9 +9,10 @@ import (
 )
 
 const (
-	bucketRetention = time.Hour
-	reservoirCap    = 1000
-	subscriberBuf   = 64 // per-subscriber channel capacity; events dropped if full (slow client)
+	bucketRetention  = time.Hour
+	reservoirCap     = 1000
+	subscriberBuf    = 64 // per-subscriber channel capacity; events dropped if full (slow client)
+	keyBreakdownTopN = 10 // cap on distinct APIKeyHash breakdown rows; remainder rolled into "other"
 )
 
 type pmKey struct {
@@ -40,6 +41,7 @@ type bucket struct {
 type bucketSet struct {
 	total *bucket
 	byPM  map[pmKey]*bucket
+	byKey map[string]*bucket // keyed by MetricEvent.APIKeyHash
 }
 
 // Store is a thread-safe in-memory metrics aggregator.
@@ -74,7 +76,7 @@ func (s *Store) Record(e MetricEvent) {
 	key := e.Timestamp.UTC().Truncate(time.Minute).Unix()
 	bs, ok := s.buckets[key]
 	if !ok {
-		bs = &bucketSet{total: &bucket{}, byPM: make(map[pmKey]*bucket)}
+		bs = &bucketSet{total: &bucket{}, byPM: make(map[pmKey]*bucket), byKey: make(map[string]*bucket)}
 		s.buckets[key] = bs
 	}
 	addToBucket(bs.total, e)
@@ -86,6 +88,15 @@ func (s *Store) Record(e MetricEvent) {
 		bs.byPM[pm] = b
 	}
 	addToBucket(b, e)
+
+	if e.APIKeyHash != "" {
+		kb, ok := bs.byKey[e.APIKeyHash]
+		if !ok {
+			kb = &bucket{}
+			bs.byKey[e.APIKeyHash] = kb
+		}
+		addToBucket(kb, e)
+	}
 
 	// Fan out to SSE subscribers. Send is non-blocking: if a subscriber's
 	// buffer is full (slow client), the event is dropped for that subscriber.
@@ -170,19 +181,27 @@ type Aggregate struct {
 }
 
 // BreakdownEntry holds aggregated metrics for a single (provider, model) pair.
-// Per-APIKeyHash breakdown is intentionally deferred; it can be added as a
-// third pmKey dimension in Step 4 if per-tenant cost visibility is needed.
 type BreakdownEntry struct {
 	Provider string
 	Model    string
 	Aggregate
 }
 
+// KeyBreakdownEntry holds aggregated metrics for a single API key (identified
+// by its SHA-256 hash — the raw key is never stored). The top keyBreakdownTopN
+// keys by RequestCount are returned individually; the rest are rolled into a
+// single entry with APIKeyHash == "other".
+type KeyBreakdownEntry struct {
+	APIKeyHash string
+	Aggregate
+}
+
 // Snapshot is the result of a Query call.
 type Snapshot struct {
-	Window     time.Duration
-	Totals     Aggregate
-	Breakdowns []BreakdownEntry
+	Window        time.Duration
+	Totals        Aggregate
+	Breakdowns    []BreakdownEntry
+	KeyBreakdowns []KeyBreakdownEntry
 }
 
 // windowAccum collects raw counters and latency samples across multiple buckets
@@ -248,6 +267,7 @@ func (s *Store) Query(window time.Duration) Snapshot {
 
 	total := &windowAccum{}
 	pmAccums := make(map[pmKey]*windowAccum)
+	keyAccums := make(map[string]*windowAccum)
 
 	for k, bs := range s.buckets {
 		if k < windowStart {
@@ -262,6 +282,14 @@ func (s *Store) Query(window time.Duration) Snapshot {
 			}
 			a.add(b)
 		}
+		for key, b := range bs.byKey {
+			a := keyAccums[key]
+			if a == nil {
+				a = &windowAccum{}
+				keyAccums[key] = a
+			}
+			a.add(b)
+		}
 	}
 
 	snap := Snapshot{Window: window, Totals: total.toAggregate()}
@@ -272,7 +300,47 @@ func (s *Store) Query(window time.Duration) Snapshot {
 			Aggregate: a.toAggregate(),
 		})
 	}
+	snap.KeyBreakdowns = topNKeyBreakdowns(keyAccums, keyBreakdownTopN)
 	return snap
+}
+
+// topNKeyBreakdowns returns the top n keys by RequestCount as individual
+// entries, rolling any remainder into a single APIKeyHash == "other" entry.
+func topNKeyBreakdowns(keyAccums map[string]*windowAccum, n int) []KeyBreakdownEntry {
+	if len(keyAccums) == 0 {
+		return nil
+	}
+	entries := make([]KeyBreakdownEntry, 0, len(keyAccums))
+	for key, a := range keyAccums {
+		entries = append(entries, KeyBreakdownEntry{APIKeyHash: key, Aggregate: a.toAggregate()})
+	}
+	// Break RequestCount ties by APIKeyHash so ranking at the top-N boundary is
+	// deterministic across polls — entries is built from map iteration, whose
+	// order is randomized per run.
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].RequestCount != entries[j].RequestCount {
+			return entries[i].RequestCount > entries[j].RequestCount
+		}
+		return entries[i].APIKeyHash < entries[j].APIKeyHash
+	})
+	if len(entries) <= n {
+		return entries
+	}
+
+	other := windowAccum{}
+	for _, e := range entries[n:] {
+		other.requestCount += e.RequestCount
+		other.promptTokens += e.PromptTokens
+		other.completionTokens += e.CompletionTokens
+		other.totalTokens += e.TotalTokens
+		other.cacheHits += e.CacheHits
+		other.cacheMisses += e.CacheMisses
+		other.errorCount += e.ErrorCount
+		other.costUSD += e.CostUSD
+	}
+	result := entries[:n]
+	result = append(result, KeyBreakdownEntry{APIKeyHash: "other", Aggregate: other.toAggregate()})
+	return result
 }
 
 // percentile returns the p-th percentile (0 < p <= 1) of samples.

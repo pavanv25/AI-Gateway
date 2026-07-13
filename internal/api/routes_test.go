@@ -477,6 +477,78 @@ func TestMetricsHandler_RequiresAuth(t *testing.T) {
 	}
 }
 
+func TestMetricsHandler_RateLimitReflectsUsage(t *testing.T) {
+	store := metrics.NewStore()
+	limiter := newTestLimiter(t, 1000)
+	if _, err := limiter.Reserve(context.Background(), "test-key", 300); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+	r := newTestRouterWithStore(limiter, map[string]provider.Provider{}, nil, store)
+
+	w := doMetricsRequest(r, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp metricsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if resp.RateLimit.Used != 300 {
+		t.Errorf("RateLimit.Used: want 300, got %d", resp.RateLimit.Used)
+	}
+	if resp.RateLimit.Limit != 1000 {
+		t.Errorf("RateLimit.Limit: want 1000, got %d", resp.RateLimit.Limit)
+	}
+}
+
+func TestMetricsHandler_CircuitBreakersDisabledReportsNA(t *testing.T) {
+	store := metrics.NewStore()
+	limiter := newTestLimiter(t, 10000)
+	// Plain (unwrapped) providers — circuit breakers not enabled.
+	providers := map[string]provider.Provider{
+		"mock": provider.NewMockProvider("x"),
+	}
+	r := newTestRouterWithStore(limiter, providers, nil, store)
+
+	w := doMetricsRequest(r, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp metricsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.CircuitBreakers) != 1 {
+		t.Fatalf("expected 1 circuit breaker entry, got %d", len(resp.CircuitBreakers))
+	}
+	if resp.CircuitBreakers[0].Provider != "mock" || resp.CircuitBreakers[0].State != "n/a" {
+		t.Errorf("expected {mock, n/a}, got %+v", resp.CircuitBreakers[0])
+	}
+}
+
+func TestMetricsHandler_CircuitBreakersReportsState(t *testing.T) {
+	store := metrics.NewStore()
+	limiter := newTestLimiter(t, 10000)
+	cb := provider.New(provider.NewMockProvider("x"), provider.Config{FailureThreshold: 1, CooldownDuration: time.Minute})
+	providers := map[string]provider.Provider{"mock": cb}
+	r := newTestRouterWithStore(limiter, providers, nil, store)
+
+	w := doMetricsRequest(r, "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp metricsResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+	if len(resp.CircuitBreakers) != 1 {
+		t.Fatalf("expected 1 circuit breaker entry, got %d", len(resp.CircuitBreakers))
+	}
+	if resp.CircuitBreakers[0].Provider != "mock" || resp.CircuitBreakers[0].State != "closed" {
+		t.Errorf("expected {mock, closed}, got %+v", resp.CircuitBreakers[0])
+	}
+}
+
 // --- GET /v1/metrics/stream tests ---
 
 func TestMetricsStreamHandler_RequiresAuth(t *testing.T) {

@@ -32,6 +32,7 @@ type Limiter struct {
 	cfg     Config
 	reserve *redis.Script
 	commit  *redis.Script
+	peek    *redis.Script
 }
 
 // New creates a Limiter. rdb must be an already-configured client;
@@ -42,6 +43,7 @@ func New(rdb *redis.Client, cfg Config) *Limiter {
 		cfg:     cfg,
 		reserve: redis.NewScript(reserveLua),
 		commit:  redis.NewScript(commitLua),
+		peek:    redis.NewScript(peekLua),
 	}
 }
 
@@ -86,6 +88,23 @@ func (l *Limiter) Commit(ctx context.Context, apiKey, reservationToken string, a
 		return fmt.Errorf("commit: %w", err)
 	}
 	return nil
+}
+
+// Usage returns the current token usage in the sliding window for apiKey,
+// alongside the configured limit. It prunes expired entries as a side
+// effect but never adds a reservation — safe to poll repeatedly.
+func (l *Limiter) Usage(ctx context.Context, apiKey string) (used, limit int, err error) {
+	nowMs := time.Now().UnixMilli()
+	winStart := nowMs - windowMS
+
+	res, err := l.peek.Run(ctx, l.rdb,
+		[]string{"rl:" + apiKey},
+		winStart,
+	).Int64()
+	if err != nil {
+		return 0, l.cfg.TPMLimit, fmt.Errorf("usage: %w", err)
+	}
+	return int(res), l.cfg.TPMLimit, nil
 }
 
 // reserveLua atomically prunes expired entries, checks the token sum, and
@@ -138,4 +157,25 @@ local new_mbr = id .. ':' .. tostring(actual)
 redis.call('ZADD', key, now_ms, new_mbr)
 redis.call('EXPIRE', key, ttl)
 return actual
+`
+
+// peekLua prunes expired entries and sums the remaining token reservations
+// without adding a new one — a read-only usage check.
+const peekLua = `
+local key       = KEYS[1]
+local win_start = tonumber(ARGV[1])
+
+redis.call('ZREMRANGEBYSCORE', key, '-inf', win_start)
+
+local entries = redis.call('ZRANGE', key, 0, -1)
+local used = 0
+for _, m in ipairs(entries) do
+    local colon = string.find(m, ':', 1, true)
+    if colon then
+        local t = tonumber(string.sub(m, colon + 1))
+        if t then used = used + t end
+    end
+end
+
+return used
 `

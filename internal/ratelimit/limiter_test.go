@@ -135,3 +135,69 @@ func TestReserve_IsolatedByAPIKey(t *testing.T) {
 		t.Errorf("keyB should be unaffected by keyA: %v", err)
 	}
 }
+
+func TestUsage_ReflectsReservations(t *testing.T) {
+	l, _, _ := newTestSetup(t, 1000)
+	ctx := context.Background()
+
+	if _, err := l.Reserve(ctx, "key1", 300); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+
+	used, limit, err := l.Usage(ctx, "key1")
+	if err != nil {
+		t.Fatalf("usage: %v", err)
+	}
+	if used != 300 {
+		t.Errorf("used = %d, want 300", used)
+	}
+	if limit != 1000 {
+		t.Errorf("limit = %d, want 1000", limit)
+	}
+
+	// Usage must not mutate the window — calling it again returns the same value.
+	used2, _, err := l.Usage(ctx, "key1")
+	if err != nil {
+		t.Fatalf("second usage: %v", err)
+	}
+	if used2 != 300 {
+		t.Errorf("second used = %d, want 300 (Usage must be idempotent)", used2)
+	}
+
+	// A subsequent Reserve should still see only the original 300 tokens used.
+	if _, err := l.Reserve(ctx, "key1", 700); err != nil {
+		t.Errorf("reserve after Usage polls: %v", err)
+	}
+}
+
+func TestUsage_PrunesExpiredEntries(t *testing.T) {
+	l, rdb, _ := newTestSetup(t, 1000)
+	ctx := context.Background()
+
+	oldScore := float64(time.Now().Add(-61 * time.Second).UnixMilli())
+	rdb.ZAdd(ctx, "rl:keyExpiry", redis.Z{Score: oldScore, Member: "stale:900"})
+
+	used, _, err := l.Usage(ctx, "keyExpiry")
+	if err != nil {
+		t.Fatalf("usage: %v", err)
+	}
+	if used != 0 {
+		t.Errorf("used = %d, want 0 (expired entry should be pruned)", used)
+	}
+}
+
+func TestUsage_EmptyKey(t *testing.T) {
+	l, _, _ := newTestSetup(t, 500)
+	ctx := context.Background()
+
+	used, limit, err := l.Usage(ctx, "neverUsed")
+	if err != nil {
+		t.Fatalf("usage: %v", err)
+	}
+	if used != 0 {
+		t.Errorf("used = %d, want 0", used)
+	}
+	if limit != 500 {
+		t.Errorf("limit = %d, want 500", limit)
+	}
+}

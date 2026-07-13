@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -36,22 +37,66 @@ func RegisterRoutes(r *gin.Engine, limiter *ratelimit.Limiter, providers map[str
 	{
 		v1.POST("/chat", chatHandler(limiter, providers, resolver, c, collector))
 		if store != nil {
-			v1.GET("/metrics", metricsHandler(store))
+			v1.GET("/metrics", metricsHandler(store, limiter, providers))
 			v1.GET("/metrics/stream", metricsStreamHandler(store))
 		}
 	}
 }
 
-// metricsHandler returns aggregated metrics for the requested time window.
+// rateLimitStatus reports the caller's own current TPM usage against the
+// configured limit — scoped to the requesting API key, not global.
+type rateLimitStatus struct {
+	Used  int
+	Limit int
+}
+
+// circuitStatus reports a single provider's circuit breaker state.
+// State is "n/a" when circuit breakers are disabled (CB_FAILURE_THRESHOLD unset).
+type circuitStatus struct {
+	Provider string
+	State    string
+}
+
+// metricsResponse wraps the aggregated Snapshot with live rate-limit and
+// circuit-breaker status. Snapshot's fields are inlined at the JSON top level.
+type metricsResponse struct {
+	metrics.Snapshot
+	RateLimit       rateLimitStatus `json:"RateLimit"`
+	CircuitBreakers []circuitStatus `json:"CircuitBreakers"`
+}
+
+// metricsHandler returns aggregated metrics for the requested time window,
+// plus the caller's current rate-limit usage and per-provider circuit state.
 // ?window accepts any Go duration string (e.g. 5m, 1h); default 5m, max 1h.
-func metricsHandler(store *metrics.Store) gin.HandlerFunc {
+func metricsHandler(store *metrics.Store, limiter *ratelimit.Limiter, providers map[string]provider.Provider) gin.HandlerFunc {
 	return func(gc *gin.Context) {
 		window, err := parseWindow(gc.Query("window"))
 		if err != nil {
 			gc.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
-		gc.JSON(http.StatusOK, store.Query(window))
+
+		apiKey := gc.GetString(ratelimit.APIKeyContextKey)
+		used, limit, err := limiter.Usage(gc.Request.Context(), apiKey)
+		if err != nil {
+			slog.Warn("rate limit usage lookup failed", "err", err)
+		}
+
+		breakers := make([]circuitStatus, 0, len(providers))
+		for name, p := range providers {
+			state := "n/a"
+			if cb, ok := p.(*provider.CircuitBreaker); ok {
+				state = cb.State().String()
+			}
+			breakers = append(breakers, circuitStatus{Provider: name, State: state})
+		}
+		sort.Slice(breakers, func(i, j int) bool { return breakers[i].Provider < breakers[j].Provider })
+
+		gc.JSON(http.StatusOK, metricsResponse{
+			Snapshot:        store.Query(window),
+			RateLimit:       rateLimitStatus{Used: used, Limit: limit},
+			CircuitBreakers: breakers,
+		})
 	}
 }
 

@@ -132,6 +132,135 @@ func TestStore_BreakdownByProviderModel(t *testing.T) {
 	}
 }
 
+func TestStore_BreakdownByAPIKeyHash(t *testing.T) {
+	now := time.Now()
+	s := newStore(fixedClock(now))
+
+	s.Record(MetricEvent{Timestamp: now, Provider: "openai", APIKeyHash: "hashA", TotalTokens: 100})
+	s.Record(MetricEvent{Timestamp: now, Provider: "anthropic", APIKeyHash: "hashB", TotalTokens: 200})
+	s.Record(MetricEvent{Timestamp: now, Provider: "openai", APIKeyHash: "hashA", TotalTokens: 50})
+
+	snap := s.Query(time.Hour)
+	if len(snap.KeyBreakdowns) != 2 {
+		t.Fatalf("expected 2 key breakdowns, got %d", len(snap.KeyBreakdowns))
+	}
+
+	byKey := make(map[string]KeyBreakdownEntry)
+	for _, kb := range snap.KeyBreakdowns {
+		byKey[kb.APIKeyHash] = kb
+	}
+
+	a, ok := byKey["hashA"]
+	if !ok {
+		t.Fatal("hashA breakdown missing")
+	}
+	if a.TotalTokens != 150 {
+		t.Fatalf("hashA TotalTokens: want 150, got %d", a.TotalTokens)
+	}
+	if a.RequestCount != 2 {
+		t.Fatalf("hashA RequestCount: want 2, got %d", a.RequestCount)
+	}
+
+	b, ok := byKey["hashB"]
+	if !ok {
+		t.Fatal("hashB breakdown missing")
+	}
+	if b.TotalTokens != 200 {
+		t.Fatalf("hashB TotalTokens: want 200, got %d", b.TotalTokens)
+	}
+}
+
+// TestStore_KeyBreakdownEmptyHashIgnored verifies that events with no APIKeyHash
+// (e.g. auth not yet resolved) are excluded from per-key breakdowns.
+func TestStore_KeyBreakdownEmptyHashIgnored(t *testing.T) {
+	now := time.Now()
+	s := newStore(fixedClock(now))
+
+	s.Record(MetricEvent{Timestamp: now, Provider: "openai", TotalTokens: 100})
+
+	snap := s.Query(time.Hour)
+	if len(snap.KeyBreakdowns) != 0 {
+		t.Fatalf("expected 0 key breakdowns for empty hash, got %d", len(snap.KeyBreakdowns))
+	}
+}
+
+// TestStore_KeyBreakdownCapsAtTopN verifies that more than keyBreakdownTopN distinct
+// API keys are capped, with the remainder rolled into a single "other" entry.
+func TestStore_KeyBreakdownCapsAtTopN(t *testing.T) {
+	now := time.Now()
+	s := newStore(fixedClock(now))
+
+	// 12 distinct keys, each with a different request count so ranking is deterministic.
+	for i := 0; i < 12; i++ {
+		hash := "hash" + string(rune('A'+i))
+		count := 12 - i // hashA has the most requests, hashL has the fewest
+		for j := 0; j < count; j++ {
+			s.Record(MetricEvent{Timestamp: now, Provider: "openai", APIKeyHash: hash, TotalTokens: 1})
+		}
+	}
+
+	snap := s.Query(time.Hour)
+	if len(snap.KeyBreakdowns) != keyBreakdownTopN+1 {
+		t.Fatalf("expected %d entries (top %d + other), got %d", keyBreakdownTopN+1, keyBreakdownTopN, len(snap.KeyBreakdowns))
+	}
+
+	var otherEntry *KeyBreakdownEntry
+	total := 0
+	for i := range snap.KeyBreakdowns {
+		kb := snap.KeyBreakdowns[i]
+		total += kb.RequestCount
+		if kb.APIKeyHash == "other" {
+			otherEntry = &snap.KeyBreakdowns[i]
+		}
+	}
+	if otherEntry == nil {
+		t.Fatal("expected an \"other\" rollup entry")
+	}
+	// hashK (count=2) + hashL (count=1) are the 2 smallest, rolled into "other".
+	if otherEntry.RequestCount != 3 {
+		t.Fatalf("other RequestCount: want 3, got %d", otherEntry.RequestCount)
+	}
+	if total != 78 { // sum(1..12) = 78
+		t.Fatalf("total RequestCount across breakdowns: want 78, got %d", total)
+	}
+}
+
+// TestStore_KeyBreakdownCapDeterministicOnTie verifies that when multiple keys tie
+// at the top-N boundary, the same hashes are chosen as individual entries on every
+// call — ranking must not depend on Go's randomized map iteration order.
+func TestStore_KeyBreakdownCapDeterministicOnTie(t *testing.T) {
+	now := time.Now()
+	s := newStore(fixedClock(now))
+
+	// 12 keys, all with the same RequestCount — a pure tie at the top-N boundary.
+	hashes := make([]string, 12)
+	for i := 0; i < 12; i++ {
+		hashes[i] = "tiehash" + string(rune('A'+i))
+		s.Record(MetricEvent{Timestamp: now, Provider: "openai", APIKeyHash: hashes[i], TotalTokens: 1})
+	}
+
+	var first []string
+	for run := 0; run < 5; run++ {
+		snap := s.Query(time.Hour)
+		if len(snap.KeyBreakdowns) != keyBreakdownTopN+1 {
+			t.Fatalf("run %d: expected %d entries, got %d", run, keyBreakdownTopN+1, len(snap.KeyBreakdowns))
+		}
+		got := make([]string, 0, len(snap.KeyBreakdowns))
+		for _, kb := range snap.KeyBreakdowns {
+			got = append(got, kb.APIKeyHash)
+		}
+		if run == 0 {
+			first = got
+			continue
+		}
+		for i := range got {
+			if got[i] != first[i] {
+				t.Fatalf("non-deterministic ranking on tie: run 0 = %v, run %d = %v", first, run, got)
+			}
+		}
+	}
+}
+
 // TestStore_WindowFiltering verifies that events outside the query window are excluded.
 func TestStore_WindowFiltering(t *testing.T) {
 	base := time.Date(2024, 1, 1, 12, 0, 0, 0, time.UTC)

@@ -290,3 +290,54 @@ func TestIsRetriable_ErrCircuitOpen(t *testing.T) {
 		t.Fatal("IsRetriable(ErrCircuitOpen) should return true")
 	}
 }
+
+// --- State() / String() ---
+
+func TestState_String(t *testing.T) {
+	cases := []struct {
+		state State
+		want  string
+	}{
+		{StateClosed, "closed"},
+		{StateOpen, "open"},
+		{StateHalfOpen, "half_open"},
+		{State(99), "unknown"},
+	}
+	for _, tc := range cases {
+		if got := tc.state.String(); got != tc.want {
+			t.Errorf("State(%d).String() = %q, want %q", tc.state, got, tc.want)
+		}
+	}
+}
+
+func TestCircuitBreaker_StateReflectsTransitions(t *testing.T) {
+	inner := &controlled{results: []error{serverErr(500), nil}}
+	cb := New(inner, Config{FailureThreshold: 1, CooldownDuration: time.Millisecond})
+
+	if got := cb.State(); got != StateClosed {
+		t.Fatalf("initial state = %v, want StateClosed", got)
+	}
+
+	_ = callChat(cb) // trips
+	if got := cb.State(); got != StateOpen {
+		t.Fatalf("state after trip = %v, want StateOpen", got)
+	}
+
+	time.Sleep(5 * time.Millisecond)
+	_ = callChat(cb) // probe succeeds -> Closed
+	if got := cb.State(); got != StateClosed {
+		t.Fatalf("state after successful probe = %v, want StateClosed", got)
+	}
+}
+
+func TestCircuitBreaker_StateThresholdZeroStaysClosed(t *testing.T) {
+	inner := &controlled{results: []error{serverErr(500)}}
+	cb := New(inner, Config{FailureThreshold: 0, CooldownDuration: time.Minute})
+
+	for i := 0; i < 5; i++ {
+		_ = callChat(cb)
+	}
+	if got := cb.State(); got != StateClosed {
+		t.Fatalf("state with disabled breaker = %v, want StateClosed", got)
+	}
+}
