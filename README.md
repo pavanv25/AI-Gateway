@@ -1,6 +1,6 @@
 # AI Gateway
 
-> A unified LLM gateway with intelligent routing, automatic failover, semantic
+> AI Gateway is a unified LLM gateway with intelligent routing, automatic failover, semantic
 > caching, and real-time observability — built in Go.
 
 ![Go](https://img.shields.io/badge/Go-1.22+-00ADD8?style=flat&logo=go&logoColor=white)
